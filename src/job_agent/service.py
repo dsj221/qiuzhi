@@ -22,7 +22,7 @@ class Service:
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o700)
         self.store = Store(directory / "job-agent.sqlite3")
-        self.model = model or Model()
+        self.model = model or Model(directory)
         token = directory / "admin.token"
         if not token.exists():
             with token.open("x") as file:
@@ -38,7 +38,7 @@ class Service:
     def overview(self):
         with self.store.transaction() as db:
             return {"profile": db.get("profile", "me"), "jobs": db.all("job")[::-1],
-                    "model_enabled": self.model.enabled}
+                    "model_enabled": self.model.enabled, "model_name": self.model.name}
 
     def save_profile(self, data):
         text = redact(data["text"])

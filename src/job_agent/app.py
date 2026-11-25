@@ -10,11 +10,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
+from .model import MatchError
 from .documents import extract_file
 from .connector import mount_connector
 from .opportunities import mount_opportunities
 from .applications import mount_applications
 from .service import Service, require
+
+
+class ModelKeyInput(BaseModel):
+    key: str = Field(min_length=8, max_length=512, pattern=r"^[!-~]+$")
 
 
 class ProfileInput(BaseModel):
@@ -141,6 +146,15 @@ def create_app(directory=None, testing=False):
         require(archive.exists(), "请先运行 python3 scripts/package_extension.py", 404)
         return FileResponse(archive, filename="job-agent-extension.zip", media_type="application/zip")
 
+    @app.exception_handler(MatchError)
+    async def match_error(request: Request, exc: MatchError):
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
+    @app.put("/api/model/key", dependencies=[Depends(admin)])
+    def configure_model(data: ModelKeyInput):
+        service.model.save_deepseek_key(data.key)
+        return {"configured": True, "model": service.model.name}
+
     @app.get("/api/overview", dependencies=[Depends(admin)])
     def overview():
         return service.overview()
@@ -168,7 +182,7 @@ def create_app(directory=None, testing=False):
         with service.store.transaction() as db:
             record = service.entity(db, "job", key)
             require(record.get("requirements_need_review"), "此岗位要求已确认；调整时请重新收藏")
-            record.update(requirements=[r.model_dump() for r in data.requirements], requirements_need_review=False, report=None)
+            record.update(requirements=[r.model_dump() for r in data.requirements], requirements_need_review=False, requirements_origin="user-reviewed", report=None)
             return db.put("job", record)
 
     @app.post("/api/jobs/{key}/assess", dependencies=[Depends(admin)])
