@@ -1,6 +1,18 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>求职 Agent · BOSS连接器</title><link rel="stylesheet" href="panel.css"><script src="jd-reader.js" defer></script><script src="panel.js" defer></script><script src="jd-panel.js" defer></script><script src="pipeline-panel.js" defer></script></head><body>
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>求职 Agent · BOSS连接器</title><link rel="stylesheet" href="panel.css"><script src="jd-reader.js" defer></script><script src="panel.js" defer></script><script src="jd-panel.js" defer></script><script src="automation.js" defer></script><script src="pipeline-panel.js" defer></script></head><body>
 <header><span>求</span><div><h1>求职 Agent</h1><p>BOSS 直聘 · 求职端连接器</p></div></header>
 <p class="notice">在 BOSS 官方页面自行登录。读取你选择的岗位详情及当前会话，不读取 Cookie 值。聊天草稿只填入输入框；第⑤项可执行你已在工作台核对并确认的具体投递批次。</p>
+<section aria-labelledby="automation-title"><h2 id="automation-title">自动求职</h2>
+<label for="automatic-mode">批次执行方式</label><select id="automatic-mode"><option value="greeting">发送招呼，记为沟通中</option><option value="resume">发送指定附件简历</option></select>
+<label id="automatic-resume-field" hidden>附件简历完整名称<input id="automatic-resume" maxlength="160"></label>
+<label class="check"><input id="automatic-enabled" type="checkbox">开启全流程自动运行</label>
+<p class="muted">开启后，扩展使用已配对的本机工作台，自动适配真实页面、导入岗位和 JD，并将核对过的当前会话消息同步到本机。保持侧栏打开，工作台会在投递前展示整批目标和发送内容。</p>
+<ol id="workflow-progress" aria-label="自动运行进度">
+<li>配对工作台 <output id="step-pair">等待开始</output></li>
+<li>配置真实页面 <output id="step-profile">等待配对</output></li>
+<li>导入岗位与 JD <output id="step-job">等待读取</output></li>
+<li>绑定与同步会话 <output id="step-chat">等待岗位</output></li>
+<li>筛选、投递与回执 <output id="step-batch">等待前序步骤</output></li>
+</ol><p id="automation-status" role="status" aria-live="polite">尚未开启</p></section>
 <details open><summary>① 配对本机工作台</summary><label for="pair">配对凭证</label><textarea id="pair" rows="3" placeholder="粘贴求职工作台生成的配对 JSON"></textarea><button id="save-pair">保存配对</button><button id="refresh-jobs" class="secondary">刷新岗位</button><label for="job">当前会话对应的内部岗位</label><select id="job"><option value="">请先配对</option></select></details>
 <details><summary>② 页面适配配置</summary><p class="muted">真实求职端需要按你登录后的页面诊断。账号、岗位、招聘方会话和消息均须有稳定ID；不能用姓名或消息正文代替。导入岗位与读取会话可以分别诊断。</p><button id="boss-job-profile" class="secondary">使用已验证的岗位列表配置</button><button id="boss-chat-profile" class="secondary">使用求职聊天快照配置</button><button id="inspect-page" class="secondary">读取可见页面结构</button><textarea id="page-structure" rows="12" readonly aria-label="可见页面结构诊断" placeholder="仅读取可见DOM，不读取网站内部运行状态"></textarea><label for="profile">选择器 JSON</label><textarea id="profile" rows="15" spellcheck="false"></textarea><button id="save-profile">保存配置</button><button id="fixture-profile" class="secondary">使用模拟配置</button></details>
 <section><h2>③ 导入当前岗位</h2><button id="diagnose-job" class="secondary full">诊断当前岗位详情</button><pre id="job-diagnosis">尚未读取岗位</pre><label class="check"><input id="job-consent" type="checkbox">我已核对当前岗位，确认导入本机工作台。</label><button id="import-job" class="full">导入当前可见岗位</button><p id="job-import-status" role="status" aria-live="polite">支持岗位列表、完整详情页，以及聊天中的“查看职位”。</p><label class="check"><input id="auto-fetch-jd" type="checkbox" checked>建档或绑定聊天时自动补全缺失 JD</label><button id="fetch-job-jd" type="button" class="secondary full">自动获取所选岗位 JD</button><p id="jd-status" role="status" aria-live="polite">选择内部岗位后，可获取并补全完整 JD。</p><p class="muted">使用岗位已保存的官方链接或当前聊天中的岗位链接，读取完整岗位详情。获取失败时，可在浏览器打开岗位详情后重试。JD 变更后，请在工作台复核岗位要求与关键词，再开始匹配。</p></section>

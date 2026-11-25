@@ -25,19 +25,22 @@ $('#save-profile').onclick=async()=>{try{const parsed=JSON.parse($('#profile').v
 $('#fixture-profile').onclick=async()=>{try{const example=await (await fetch(chrome.runtime.getURL('fixture-profile.json'))).json();$('#profile').value=JSON.stringify(example,null,2);status('模拟配置已填入，请点击保存配置');}catch(e){failure(e);}};
 let importBusy=false;
 function importStatus(text,error=false){$('#job-import-status').textContent=text;$('#job-import-status').dataset.error=String(error);}
-async function readImportJob(){
-  const context=await page('JOB_IMPORT_CONTEXT');if(context.kind==='job')return context.job;
+async function readImportJob(context=undefined,onDetail){
+  context=context||await page('JOB_IMPORT_CONTEXT');if(context.kind==='job')return context.job;
   importStatus('正在打开当前聊天的岗位详情…');
+  const existingTabs=new Set((await chrome.tabs.query({currentWindow:true})).map(tab=>tab.id));
   await page('OPEN_CHAT_JOB',{},context.tabId);
   const same=(a,b)=>a.replace(/\s/g,'').toLocaleLowerCase()===b.replace(/\s/g,'').toLocaleLowerCase();
   let last;
   for(let i=0;i<50;i++){
     const [active]=await chrome.tabs.query({active:true,currentWindow:true});
     if(active?.id===context.tabId){await new Promise(resolve=>setTimeout(resolve,300));continue;}
-    if(!active||active.openerTabId!==context.tabId||!/^https:\/\/www\.zhipin\.com\/job_detail\/[\w-]+\.html(?:[?#]|$)/.test(active.url||''))throw Error('导入过程中页面已变化，请在目标岗位详情页重新点击导入');
+    if(active&&active.status!=='complete'){await new Promise(resolve=>setTimeout(resolve,300));continue;}
+    if(!active||existingTabs.has(active.id)||(active.openerTabId!=null&&active.openerTabId!==context.tabId)||!/^https:\/\/www\.zhipin\.com\/job_detail\/[\w-]+\.html(?:[?#]|$)/.test(active.url||''))throw Error('导入过程中页面已变化，请在目标岗位详情页重新点击导入');
     try{
       const {tabId,...job}=await page('READ_DETAIL_JOB',{},active.id);
       if(!same(job.title,context.title)||(context.company&&!same(job.company,context.company)))throw Error('详情页的岗位或公司与刚才聊天不一致，已停止导入');
+      if(onDetail)onDetail(active.id);
       return job;
     }catch(error){last=error;if(/不一致|登录|验证/.test(error.message))throw error;}
     await new Promise(resolve=>setTimeout(resolve,300));
@@ -53,7 +56,7 @@ async function readJobAction(importing){
     const snap=await readImportJob();$('#job-diagnosis').textContent=JSON.stringify(snap,null,2);
     if(!importing){importStatus('已读取 '+snap.company+' · '+snap.title+'，核对后可点击导入。');return;}
     const imported=await api('IMPORT_JOB',{...snap,confirmed:true});await jobs(imported.job_id);
-    const message=imported.existing?'该岗位已存在，已选中原记录；没有重复创建。如需更新正文，可点击下方“自动获取所选岗位JD”。':'已导入 '+snap.company+' · '+snap.title+'，请回工作台校对岗位要求。';
+    const message=imported.metadata_repaired?'该岗位已存在，已根据真实详情校正公司名称并选中原记录；投递进度已保留。':imported.existing?'该岗位已存在，已选中原记录；没有重复创建。如需更新正文，可点击下方“自动获取所选岗位JD”。':'已导入 '+snap.company+' · '+snap.title+'，请回工作台校对岗位要求。';
     importStatus(message);status(message);
   }catch(error){const message=/Receiving end|Could not establish connection|Extension context invalidated/.test(error.message)?'当前页面尚未载入扩展，请刷新这个BOSS页面后重试。':error.message;importStatus('未完成：'+message,true);}
   finally{importBusy=false;$('#import-job').disabled=false;$('#diagnose-job').disabled=false;}

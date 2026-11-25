@@ -275,7 +275,9 @@ def mount_opportunities(app, service, connector, admin):
         with service.store.transaction() as db:
             connector.authenticate(db, key, request.headers.get('authorization', '').removeprefix('Bearer '))
             prefs = opportunities.preferences(db)
-            return {'preferences': prefs, 'search_plan': search_plan(prefs)}
+            profile = db.get('profile', 'me')
+            return {'preferences': prefs, 'search_plan': search_plan(prefs),
+                    'resume_revision': profile['revision'] if profile else None}
 
     @app.post('/api/connector/{key}/opportunities')
     def collect(key: str, data: CollectionInput, request: Request):

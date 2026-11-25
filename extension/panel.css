@@ -3,3 +3,5 @@
 input:not([type=checkbox]){width:100%;padding:9px;border:1px solid #c8d6df;border-radius:7px;background:white} [hidden]{display:none!important}
 
 #job-import-status{font-size:13px;overflow-wrap:anywhere}#job-import-status[data-error=true]{color:#a33d30}
+
+#workflow-progress{padding-left:1.6rem}#workflow-progress li{margin:.4rem 0}#workflow-progress output{display:block;color:#486573;font-size:.86rem;overflow-wrap:anywhere}

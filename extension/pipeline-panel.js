@@ -33,21 +33,26 @@
       const current=await select(candidate.external_id,epoch);if(current.account_label!==listing.account_label)throw Error('显示账号已变化');check(epoch);
       const result=await api('COLLECT',{jobs:[current.job],search_url:listing.list_url,preferences_revision:settings.preferences.revision});
       seen.add(candidate.external_id);counts.read++;const status=result.opportunities[0].screening.result;counts.matched+=status==='matched'?1:0;counts.review+=status==='review'?1:0;
+      if(status==='matched')counts.ids?.push(result.opportunities[0].id);
     }
   }
   async function refreshBatches(){const data=await api('APPLICATIONS');q('#application-batch').replaceChildren(new Option('选择已确认批次',''),...data.batches.map(b=>new Option(`${b.id.slice(0,8)} · ${b.mode==='resume'?'发送指定简历':'打招呼'} · ${data.items.filter(i=>i.batch_id===b.id).length} 个待处理`,b.id)));return data;}
-  async function begin(work){if(busy)return;busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);}catch(error){say('已停止：'+error.message);}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
-  q('#search-jobs').onclick=()=>begin(async epoch=>{
-    const settings=await api('SEARCH'),plan=settings.search_plan;if(!plan?.entries.length)throw Error('请先在工作台保存筛选条件');
-    const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if(profile.jobSelector==='#fixture-job')throw Error('模拟配置仅支持采集模拟列表；搜索真实岗位前请使用已验证的岗位列表配置');
-    const counts={read:0,matched:0,review:0},seen=new Set();
+  async function begin(work){if(busy)return;busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
+  async function search(epoch,settings,expectedTab=null,expectedAccount=null){
+    const plan=settings.search_plan;if(!plan?.entries.length)throw Error('请先在工作台保存筛选条件');
+    const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if((expectedTab!==null&&expectedTab!==operationTab)||(expectedAccount&&expectedAccount!==context.account_label))throw Error('自动搜索的账号或标签页已变化');if(profile.jobSelector==='#fixture-job')throw Error('模拟配置仅支持采集模拟列表；搜索真实岗位前请使用已验证的岗位列表配置');
+    const counts={read:0,matched:0,review:0,ids:[]},seen=new Set();
     for(let i=0;i<plan.entries.length;i++){
       const entry=plan.entries[i];check(epoch);say(`正在搜索 ${i+1}/${plan.entries.length}：${entry.title} · ${entry.city}`);
       if(i>0&&(await api('SEARCH')).preferences.revision!==settings.preferences.revision)throw Error('筛选条件已更新，请重新启动搜索');check(epoch);
       const listing=await navigate(entry.url,epoch);if(listing.account_label!==context.account_label)throw Error('显示账号已变化');
       await collectListing(listing,settings,epoch,seen,counts);
     }
-    say(`搜索完成：${plan.entries.length}/${plan.total} 组条件，去重读取 ${counts.read} 个岗位，${counts.matched} 个符合，${counts.review} 个待核对。回工作台勾选符合项并预览投递批次。`);await jobs();
+    await jobs();return {counts,plan,context};
+  }
+  q('#search-jobs').onclick=()=>begin(async epoch=>{
+    const {counts,plan}=await search(epoch,await api('SEARCH'));
+    say(`搜索完成：${plan.entries.length}/${plan.total} 组条件，去重读取 ${counts.read} 个岗位，${counts.matched} 个符合，${counts.review} 个待核对。回工作台勾选符合项并预览投递批次。`);
   });
   q('#collect-jobs').onclick=()=>begin(async epoch=>{
     const settings=await api('SEARCH');if(!settings.preferences.revision)throw Error('请先在工作台保存筛选条件');
@@ -56,8 +61,8 @@
     say(`本页处理完成：${counts.read} 个岗位，${counts.matched} 个符合条件，${counts.review} 个待核对；符合项按工作台设置自动收藏。`);await jobs();
   });
   q('#refresh-batches').onclick=()=>refreshBatches().then(()=>say('已刷新，请核对批次后执行')).catch(error=>say(error.message));
-  q('#run-applications').onclick=()=>begin(async epoch=>{
-    const batchId=q('#application-batch').value;if(!batchId)throw Error('请选择已确认批次');
+  async function executeBatch(epoch,batchId){
+    if(!batchId)throw Error('请选择已确认批次');
     const pending=await api('APPLICATIONS'),batch=pending.batches.find(b=>b.id===batchId);if(!batch)throw Error('批次已暂停或过期，请回工作台核对');
     if(batch.mode==='resume'&&profile.resumeChooserVerified!==true)throw Error('当前页面的附件简历选择器尚未完成现场诊断，暂不执行文件发送；批次保留为待处理。');
     currentBatch=batchId;const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if(context.account_label!==batch.account_label)throw Error('当前显示账号与批次不一致');
@@ -95,7 +100,8 @@
       }
     }
     say('批次处理结束。请回工作台查看各岗位回执；只有指定简历明确已发送才记为已投递。');await refreshBatches();startReceiptSync();
-  });
+  }
+  q('#run-applications').onclick=()=>begin(epoch=>executeBatch(epoch,q('#application-batch').value));
   async function syncReceipts(){
     if(busy||receiptBusy)return;receiptBusy=true;
     try{const pending=await api('APP_RECEIPTS');let count=0;
@@ -124,7 +130,12 @@
     }
   }
   async function halt(){generation++;clearInterval(receiptTimer);receiptTimer=null;if(operationTab)void chrome.tabs.sendMessage(operationTab,{type:'PIPE_CANCEL',profile}).catch(()=>{});if(currentBatch){try{await api('APP_STOP',{},currentBatch);}catch{}}say('已停止。可能已点击的动作需核对平台，不自动重试。');}
-  q('#stop-pipeline').onclick=()=>void halt();
+  const automation=window.startJobAutomation?.({
+    search,executeBatch,begin,halt,check,syncReceipts,
+    occupied:()=>busy||importBusy||jdBusy||!!bound||running,
+    status:say
+  });
+  q('#stop-pipeline').onclick=()=>automation?.enabled()?automation.disable():halt();
   chrome.tabs.onActivated.addListener(({tabId})=>{if(busy&&operationTab&&operationTab!==tabId)void halt();});
   window.addEventListener('pagehide',()=>{generation++;clearInterval(receiptTimer);});
 })();

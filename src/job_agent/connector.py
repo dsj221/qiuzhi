@@ -19,6 +19,12 @@ class ConnectionInput(BaseModel):
     label: str = Field(min_length=1, max_length=80)
 
 
+class ViewLabels(BaseModel):
+    account: str = Field(default="", max_length=160)
+    conversation: str = Field(default="", max_length=160)
+    position: str = Field(default="", max_length=160)
+
+
 class PageJob(BaseModel):
     external_id: str = Field(min_length=1, max_length=200)
     title: str = Field(min_length=2, max_length=80)
@@ -27,6 +33,7 @@ class PageJob(BaseModel):
     description: str = Field(min_length=20, max_length=20000)
     url: str = Field(max_length=2000)
     confirmed: bool
+    verified_chat: Optional[ViewLabels] = None
 
 
 class ChatJobInput(BaseModel):
@@ -51,12 +58,6 @@ class Message(BaseModel):
     event_key: str = Field(default="", max_length=200)
     role: Literal["me", "recruiter"]
     text: str = Field(min_length=1, max_length=6000)
-
-
-class ViewLabels(BaseModel):
-    account: str = Field(default="", max_length=160)
-    conversation: str = Field(default="", max_length=160)
-    position: str = Field(default="", max_length=160)
 
 
 class Observation(BaseModel):
@@ -156,7 +157,8 @@ class Connector:
             connection = self.authenticate(db, key, token)
             connection["last_seen"] = time.time()
             db.put("boss_connection", connection)
-            return {"jobs": [{**{k: j[k] for k in ("id", "title", "company")}, "url": j.get("url", ""),
+            return {"bound_job_id": (connection.get("session") or {}).get("job_id"), "labels": connection.get("labels"),
+                    "jobs": [{**{k: j[k] for k in ("id", "title", "company")}, "url": j.get("url", ""),
                               "external_id": j.get("boss_external_id", ""),
                               "needs_jd": j.get("source") == "boss-chat" and not j.get("jd_fetched_at")}
                              for j in db.all("job")]}
@@ -184,6 +186,16 @@ class Connector:
             require(normalize(job["title"]) == normalize(data["title"]) and normalize(job["company"]) == normalize(data["company"]),
                     "获取的JD与所选岗位名称或公司不一致，未覆盖原档案")
             require(not job.get("boss_external_id") or job["boss_external_id"] == data["external_id"], "获取的JD属于其他岗位，未覆盖原档案")
+            if data.get('verified_chat'):
+                labels = data['verified_chat']
+                require(official and job.get('source') == 'boss-chat' and
+                        (connection.get('session') or {}).get('job_id') == job_id and
+                        all((connection.get('labels') or {}).get(k) == redact(labels[k]) for k in ('account', 'conversation', 'position')),
+                        '原会话绑定已变化，请重新核对')
+                require(not any(j['id'] != job_id and j.get('source') == 'boss' and
+                                j.get('boss_external_id') == data['external_id'] for j in db.all('job')),
+                        '此岗位已有官方记录，请刷新后重试')
+                job['source'] = 'boss'
             changed = job.get("description") != description
             if changed:
                 job.update(description=description, requirements=jd_requirements(description), requirements_need_review=True, report=None)
@@ -218,7 +230,14 @@ class Connector:
             self.authenticate(db, key, token)
             old = next((j for j in db.all("job") if j.get("boss_external_id") == data["external_id"] and j.get("source") == ("fixture" if fixture else "boss")), None)
             if old:
-                return {"job_id": old["id"], "existing": True}
+                repaired = False
+                normalize = lambda value: "".join(value.split())
+                previous, company, city = normalize(old['company']), normalize(data['company']), normalize(data.get('city', ''))
+                if city and previous.startswith(company) and re.fullmatch(re.escape(city) + r'(?:经验不限|在校/应届|\d+(?:-\d+)?年|\d+年以上)(?:本科|硕士|博士|大专|高中|中专|学历不限)', previous[len(company):]):
+                    old['company'] = data['company']
+                    db.put('job', old)
+                    repaired = True
+                return {"job_id": old["id"], "existing": True, "metadata_repaired": repaired}
             # Do not pretend that a scraped JD has been semantically decomposed.
             requirements = jd_requirements(data["description"])
             record = {k: data[k] for k in ("title", "company", "city", "description", "url")}

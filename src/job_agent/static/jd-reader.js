@@ -36,10 +36,23 @@
     let company=field(['.sider-company .company-info .company-name','.company-info .name a','.company-info .name'],false);
     if(!company){
       const banner=doc.querySelector('.job-banner');
-      company=banner?text(banner).match(/客户公司[：:]\s*([^\n]+)/)?.[1]?.trim()||'':'';
+      if(banner){
+        const walker=doc.createTreeWalker(banner,4);let node;
+        while((node=walker.nextNode())){
+          const match=(node.textContent||'').trim().match(/^客户公司[：:]\s*(.*)$/);
+          if(!match)continue;
+          company=match[1].trim();
+          while(!company&&(node=walker.nextNode()))company=(node.textContent||'').trim();
+          break;
+        }
+      }
+    }
+    if(!company){
+      const name=field(['.job-sider .sider-company .company-info'],false);
+      if(name&&!/[\r\n]/.test(name))company=name;
     }
     if(!company)throw Error('未读取到岗位公司或猎头客户公司，请打开完整岗位详情后重试');
-    const description=field(['.job-detail-section .job-sec-text','.job-sec-text']);
+    const description=field(['.job-detail-section > .job-sec-text:not(.fold-text)', '.job-detail-section .job-sec-text:not(.fold-text)', '.job-sec-text']);
     const city=field(['.job-banner .text-city','.job-banner .job-area'],false);
     if(title.length<2||title.length>80||company.length>100||description.length<20||description.length>20000||city.length>80)throw Error('岗位正文字段不完整或过长，请打开完整详情后重试');
     return {external_id,title,company,description,city,url};

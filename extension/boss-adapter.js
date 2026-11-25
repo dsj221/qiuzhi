@@ -60,12 +60,19 @@
     }
     importContext(){
       this.guard();
-      if(this.doc.location.pathname!=='/web/geek/chat')return {kind:'job',job:this.job()};
+      if(this.doc.location.pathname!=='/web/geek/chat'){
+        const job=this.job();
+        const buttons=[...this.doc.querySelectorAll('.job-banner .btn-startchat[data-isfriend="true"], .job-detail-op a.op-btn-chat')];
+        const existingChat=buttons.some(el=>this.visible(el)&&this.text(el)==='继续沟通');
+        return {kind:'job',job,existingChat};
+      }
       const title=this.text(this.unique(this.profile.viewPositionSelector||'.chat-position-content')).split('\n')[0].trim().replace(/[（(]猎头职位[）)]$/, '').trim();
       let company=this.text(this.unique(this.profile.viewConversationSelector||'.chat-conversation .user-info')).split('\n')[1]?.trim()||'';
       if(['猎头顾问','猎头','招聘者','更多','HR','人事'].includes(company))company='';
       if(!title)throw Error('请先在聊天页选中一个会话，展开岗位信息后再导入');
-      return {kind:'chat',title,company};
+      const contact=this.text(this.unique(this.profile.viewConversationSelector||'.chat-conversation .user-info'));
+      const input=this.doc.querySelector(this.profile.inputSelector||'#chat-input');
+      return {kind:'chat',title,company,contact,drafting:!!(input&&(input.value||this.text(input)).trim())};
     }
     openChatJob(){
       const context=this.importContext();if(context.kind!=='chat')throw Error('当前不是聊天岗位页');

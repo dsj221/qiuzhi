@@ -27,6 +27,16 @@ class BatchInput(BaseModel):
     message_template: str = Field(default='您好，我关注到贵公司的“{岗位}”岗位，希望进一步了解岗位职责。', min_length=4, max_length=3000)
 
 
+class AutomaticDraftInput(BaseModel):
+    opportunity_ids: List[str] = Field(max_length=400)
+    preferences_revision: int
+    resume_revision: int
+    account_label: str = Field(min_length=1, max_length=160)
+    mode: Literal['greeting', 'resume']
+    resume_label: str = Field(default='', max_length=160)
+    message_template: str = Field(default='您好，我关注到贵公司的“{岗位}”岗位，希望进一步了解岗位职责。', min_length=4, max_length=3000)
+
+
 class ApprovalInput(BaseModel):
     digest: str
     targets_confirmed: bool
@@ -84,38 +94,65 @@ class Applications:
                                        **({'search_url': item['search_url']} if item.get('search_url') else {})} for item in items]})
 
     def create(self, data):
+        with self.service.store.transaction() as db:
+            return self.create_in(db, data)
+
+    def prepare_automatic(self, key, token, request):
+        with self.service.store.transaction() as db:
+            self.connector.authenticate(db, key, token)
+            profile = db.get('profile', 'me')
+            require(profile and profile['revision'] == request.resume_revision and
+                    self.opportunities.preferences(db)['revision'] == request.preferences_revision,
+                    '简历或筛选条件已更新，请按新版本重新搜索')
+            prior = {(i['source'], i['external_id']) for i in db.all('application_item')
+                     if i['state'] not in {'CANCELLED', 'FAILED', 'NEEDS_USER'} or i.get('preflight_at')}
+            saved = {(j.get('source'), j.get('boss_external_id')): j['status'] for j in db.all('job')}
+            eligible = []
+            for oid in dict.fromkeys(request.opportunity_ids):
+                op = self.service.entity(db, 'opportunity', oid)
+                require(op['source'] == 'boss' and op['connection_id'] == key, '只能准备本连接搜索到的真实岗位')
+                identity = ('boss', op['external_id'])
+                if identity not in prior and saved.get(identity, 'saved') == 'saved':
+                    eligible.append(oid)
+            batches = []
+            options = request.model_dump(exclude={'opportunity_ids', 'preferences_revision', 'resume_revision'})
+            for start in range(0, len(eligible), 10):
+                data = dict(options, connection_id=key, opportunity_ids=eligible[start:start+10], automatic=True)
+                batches.append(self.create_in(db, data)['batch']['id'])
+            return {'batches': batches, 'eligible': len(eligible)}
+
+    def create_in(self, db, data):
         require(len(set(data['opportunity_ids'])) == len(data['opportunity_ids']), '同一岗位不能重复加入批次', 422)
         require(data['mode'] != 'resume' or bool(data['resume_label'].strip()), '请填写本次在BOSS使用的准确简历名称', 422)
-        with self.service.store.transaction() as db:
-            connection = self.service.entity(db, 'boss_connection', data['connection_id'])
-            require(not connection['revoked'], '连接已撤销')
-            profile = db.get('profile', 'me')
-            require(profile is not None, '请先保存我的简历')
-            prefs = self.opportunities.preferences(db)
-            batch_id = uuid.uuid4().hex
-            batch = {'id': batch_id, **data, 'state': 'DRAFT', 'resume_revision': profile['revision'],
-                     'preferences_revision': prefs['revision'], 'created_at': time.time()}
-            items = []
-            for key in data['opportunity_ids']:
-                opportunity = self.service.entity(db, 'opportunity', key)
-                require(opportunity['connection_id'] == connection['id'], '所选岗位来自不同连接，请分批处理')
-                require(not opportunity.get('jd_outdated'), '岗位JD已更新，请重新采集并筛选')
-                require(opportunity['screening']['result'] == 'matched', '只允许将符合已设筛选条件的岗位加入自动投递')
-                require(opportunity['resume_revision'] == profile['revision'] and opportunity['preferences_revision'] == prefs['revision'], '岗位匹配已过期，请重新筛选')
-                job = self.opportunities.favorite_in(db, opportunity)
-                require(job['status'] == 'saved', '此岗位已有投递或沟通记录，不能自动重复投递')
-                require(not any(i['external_id'] == opportunity['external_id'] and i['source'] == opportunity['source'] and i['state'] not in {'CANCELLED', 'FAILED', 'NEEDS_USER'} for i in db.all('application_item')), '此岗位已在投递队列或有待核对结果，不能重复加入')
-                db.put('opportunity', opportunity)
-                item = {k: opportunity[k] for k in ('external_id', 'url', 'title', 'company', 'content_hash', 'source')}
-                validate_search_url(opportunity.get('search_url', ''), opportunity['source'])
-                item['search_url'] = opportunity.get('search_url', '')
-                item.update(id=uuid.uuid4().hex, batch_id=batch_id, opportunity_id=key, job_id=job['id'], connection_id=connection['id'], state='DRAFT',
-                            mode=data['mode'], resume_label=data['resume_label'].strip(), message=data['message_template'].replace('{岗位}', opportunity['title']).replace('{公司}', opportunity['company']), created_at=time.time())
-                db.put('application_item', item)
-                items.append(item)
-            batch['digest'] = self.manifest(batch, items)
-            db.put('application_batch', batch)
-            return {'batch': batch, 'items': items}
+        connection = self.service.entity(db, 'boss_connection', data['connection_id'])
+        require(not connection['revoked'], '连接已撤销')
+        profile = db.get('profile', 'me')
+        require(profile is not None, '请先保存我的简历')
+        prefs = self.opportunities.preferences(db)
+        batch_id = uuid.uuid4().hex
+        batch = {'id': batch_id, **data, 'state': 'DRAFT', 'resume_revision': profile['revision'],
+                 'preferences_revision': prefs['revision'], 'created_at': time.time()}
+        items = []
+        for key in data['opportunity_ids']:
+            opportunity = self.service.entity(db, 'opportunity', key)
+            require(opportunity['connection_id'] == connection['id'], '所选岗位来自不同连接，请分批处理')
+            require(not opportunity.get('jd_outdated'), '岗位JD已更新，请重新采集并筛选')
+            require(opportunity['screening']['result'] == 'matched', '只允许将符合已设筛选条件的岗位加入自动投递')
+            require(opportunity['resume_revision'] == profile['revision'] and opportunity['preferences_revision'] == prefs['revision'], '岗位匹配已过期，请重新筛选')
+            job = self.opportunities.favorite_in(db, opportunity)
+            require(job['status'] == 'saved', '此岗位已有投递或沟通记录，不能自动重复投递')
+            require(not any(i['external_id'] == opportunity['external_id'] and i['source'] == opportunity['source'] and i['state'] not in {'CANCELLED', 'FAILED', 'NEEDS_USER'} for i in db.all('application_item')), '此岗位已在投递队列或有待核对结果，不能重复加入')
+            db.put('opportunity', opportunity)
+            item = {k: opportunity[k] for k in ('external_id', 'url', 'title', 'company', 'content_hash', 'source')}
+            validate_search_url(opportunity.get('search_url', ''), opportunity['source'])
+            item['search_url'] = opportunity.get('search_url', '')
+            item.update(id=uuid.uuid4().hex, batch_id=batch_id, opportunity_id=key, job_id=job['id'], connection_id=connection['id'], state='DRAFT',
+                        mode=data['mode'], resume_label=data['resume_label'].strip(), message=data['message_template'].replace('{岗位}', opportunity['title']).replace('{公司}', opportunity['company']), created_at=time.time())
+            db.put('application_item', item)
+            items.append(item)
+        batch['digest'] = self.manifest(batch, items)
+        db.put('application_batch', batch)
+        return {'batch': batch, 'items': items}
 
     def current(self, db, batch):
         profile = db.get('profile', 'me')
@@ -186,7 +223,21 @@ class Applications:
             ids = {b['id'] for b in batches}
             items = [{**{k: i[k] for k in ('id', 'batch_id', 'external_id', 'url', 'title', 'company', 'mode', 'resume_label', 'state')},
                       'search_url': i.get('search_url', '')} for i in db.all('application_item') if i['batch_id'] in ids and i['state'] == 'PENDING']
-            return {'batches': batches, 'items': items}
+            drafts = [{'id': b['id'], 'account_label': b['account_label']} for b in db.all('application_batch')
+                      if b['connection_id'] == key and b.get('automatic') and b['state'] == 'DRAFT']
+            return {'batches': batches, 'items': items, 'drafts': drafts}
+
+    def dispatch(self, key, token, batch_id):
+        self.sweep()
+        with self.service.store.transaction() as db:
+            self.connector.authenticate(db, key, token)
+            batch = self.service.entity(db, 'application_batch', batch_id)
+            require(batch['connection_id'] == key and batch.get('automatic') and batch['state'] == 'APPROVED'
+                    and not batch.get('dispatched_at'), '该批次已领取或需要重新核对')
+            self.current(db, batch)
+            batch['dispatched_at'] = time.time()
+            db.put('application_batch', batch)
+            return {'ok': True}
 
     def claim(self, key, token, data):
         self.sweep()
@@ -333,9 +384,17 @@ def mount_applications(app, service, connector, opportunities, admin):
     def cancel(key: str):
         return applications.cancel(key)
 
+    @app.post('/api/connector/{key}/applications/drafts')
+    def prepare_automatic(key: str, data: AutomaticDraftInput, request: Request):
+        return applications.prepare_automatic(key, token(request), data)
+
     @app.get('/api/connector/{key}/applications')
     def ready(key: str, request: Request):
         return applications.ready(key, token(request))
+
+    @app.post('/api/connector/{key}/applications/{batch_id}/dispatch')
+    def dispatch(key: str, batch_id: str, request: Request):
+        return applications.dispatch(key, token(request), batch_id)
 
     @app.post('/api/connector/{key}/applications/claim')
     def claim(key: str, data: ApplicationClaim, request: Request):

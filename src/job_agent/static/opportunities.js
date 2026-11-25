@@ -58,9 +58,15 @@
       return `<article class="batch-record"><div class="section-heading"><strong>批次 ${b.id.slice(0,8)}</strong><span class="badge">${batchLabels[b.state]}</span></div><p>${items.length} 个具体目标 · ${b.mode==='resume'?'指定简历：'+esc(b.resume_label):'发送招呼，仅记沟通中'} · 账号 ${esc(b.account_label)}</p><details><summary>逐项查看平台结果</summary><ul>${items.map(i=>`<li><strong>${esc(i.company)} · ${esc(i.title)}</strong><br>${outcomeLabels[i.state]}${i.source==='fixture'?' · 模拟页面':''}${i.reason?'<br>'+esc(i.reason):''}${i.evidence?'<br>回执：'+esc(i.evidence.slice(0,300)):''}</li>`).join('')}</ul></details><div class="actions">${b.state==='DRAFT'?`<button class="primary" data-review-batch="${b.id}">查看并确认具体投递内容</button>`:''}${['DRAFT','APPROVED','RUNNING','NEEDS_REVIEW'].includes(b.state)?`<button class="secondary" data-cancel-batch="${b.id}">取消剩余任务</button>`:''}</div></article>`;
     }).join('')||'<p class="batch-empty">还没有投递批次。勾选符合项后，可预览本次具体目标。</p>';
   }
+  const requestedReview=window.location?new URLSearchParams(window.location.search).get('review'):null;
+  let openedRequestedReview=false;
   function showReview(batch,items){
     review=batch;q('#application-approval-form').reset();q('#application-review-error').classList.add('hidden');
     q('#application-review-content').innerHTML=`<p>显示账号：<strong>${esc(batch.account_label)}</strong></p><p>执行方式：${batch.mode==='resume'?'发送BOSS中的指定简历 '+esc(batch.resume_label):'发送以下已确认招呼（仅同步为沟通中）'}</p><p class="field-help">平台“立即沟通”可能同时展示在线简历并发送BOSS设置的默认招呼。若会话已有本人已发送消息，本批次只核对已有沟通，不追加模板。以下目标和内容已冻结，修改简历或条件后需要重新准备。</p>${items.map(i=>`<article class="batch-target"><h3>${esc(i.company)} · ${esc(i.title)}</h3><a href="${esc(i.url)}" target="_blank" rel="noopener noreferrer">查看具体岗位 ↗</a><p>${batch.mode==='greeting'?esc(i.message):'发送内容：BOSS中的指定简历 '+esc(batch.resume_label)}</p><p class="muted">${i.source==='fixture'?'仅在模拟页面执行':'真实BOSS岗位'}</p></article>`).join('')}`;
+    q('#application-approval-note').textContent=batch.automatic
+      ?'确认后，已开启自动化的扩展会回到 BOSS，按以上目标执行。确认有效期为15分钟。'
+      :'确认后，在扩展中执行此批次。确认有效期为15分钟。';
+    q('#approve-batch').textContent=batch.automatic?'确认以上目标与发送内容，自动执行':'确认以上目标与发送内容，加入执行队列';
     q('#application-review').showModal();
   }
   async function load(){
@@ -68,6 +74,11 @@
     try{const results=await Promise.all([api('/api/opportunities'),api('/api/applications'),api('/api/boss')]);data=results[0];deliveries=results[1];connections=results[2].connections;if(!q('#opportunity-results').contains(document.activeElement))render();
       const signature=JSON.stringify([data.opportunities.map(o=>o.favorite_id),deliveries.items.map(i=>[i.id,i.state]),data.has_resume,data.preferences.revision]);
       if(signature!==overviewSignature&&!document.activeElement?.matches('input,textarea,select')){await refresh();overviewSignature=signature;}
+      if(requestedReview&&!openedRequestedReview&&!q('#application-review').open){
+        openedRequestedReview=true;
+        const batch=deliveries.batches.find(b=>b.id===requestedReview);
+        if(batch?.state==='DRAFT')showReview(batch,deliveries.items.filter(i=>i.batch_id===batch.id).reverse());
+      }
     }
     finally{loading=false;}
   }
@@ -80,7 +91,7 @@
     for(const name of ['accept_internship','accept_other_cities','auto_favorite'])body[name]=form.elements[name].checked;
     const result=await api('/api/opportunities/preferences','PUT',body);q('#preferences-status').textContent='已保存条件版本 '+result.revision;await load();
     const first=result.search_plan?.entries[0];if(openSearch&&first&&popup)popup.location.replace(first.url);else popup?.close();
-    toast(openSearch&&!popup?'条件已保存。浏览器未打开新页面，请点击搜索计划中的链接。':'筛选条件已保存，请在BOSS扩展第⑤项点击“按已保存条件搜索并筛选”');
+    toast(openSearch&&!popup?'条件已保存。浏览器未打开新页面，请点击搜索计划中的链接。':'筛选条件已保存。已开启自动求职的扩展将按新条件搜索');
     }catch(err){popup?.close();throw err;}
   });});
   q('#application-batch-form').addEventListener('submit',event=>{event.preventDefault();void act(async()=>{
@@ -90,7 +101,7 @@
     const result=await api('/api/applications','POST',body);await load();await refresh();showReview(result.batch,result.items);
   });});
   q('#application-approval-form').addEventListener('submit',event=>{event.preventDefault();void act(async()=>{
-    if(!review)throw Error('请重新打开批次预览');await api('/api/applications/'+review.id+'/approve','POST',{digest:review.digest,targets_confirmed:event.target.elements.targets_confirmed.checked,resume_confirmed:event.target.elements.resume_confirmed.checked});q('#application-review').close();await load();toast('批次已确认，请到BOSS扩展执行；只处理本次列出的目标');
+    if(!review)throw Error('请重新打开批次预览');await api('/api/applications/'+review.id+'/approve','POST',{digest:review.digest,targets_confirmed:true,resume_confirmed:true});q('#application-review').close();await load();toast(review.automatic?'已确认，扩展将自动执行本批次':'批次已确认，可在 BOSS 扩展执行');
   });});
   document.addEventListener('change',event=>{
     if(event.target.dataset.pickOpportunity){const id=event.target.dataset.pickOpportunity;if(event.target.checked)picked.add(id);else picked.delete(id);alignConnection();}
