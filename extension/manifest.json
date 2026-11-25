@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "求职 Agent · BOSS 本地连接器",
+  "version": "0.6.1",
+  "description": "按工作台筛选条件搜索BOSS岗位，匹配并收藏机会，同步本人会话，执行已核对的有限投递批次并记录平台回执。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*",
+    "http://127.0.0.1:8766/*"
+  ],
+  "action": {
+    "default_title": "打开求职 Agent"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/*",
+        "http://127.0.0.1:8766/boss-fixture*"
+      ],
+      "js": [
+        "jd-reader.js",
+        "boss-adapter.js",
+        "pipeline-adapter.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

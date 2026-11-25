@@ -1,0 +1,19 @@
+{
+  "jobUrlSelector": ".job-detail-body a.more-job-btn",
+  "titleSelector": ".job-detail-info span.job-name",
+  "verifyTitleSelector": ".job-card-wrap.active a.job-name",
+  "companySelector": ".job-card-wrap.active span.boss-name",
+  "citySelector": ".job-card-wrap.active span.company-location",
+  "descriptionSelector": ".job-detail-body p.desc",
+  "captureMode": "snapshot",
+  "viewAccountSelector": ".user-nav a[href=\"https://www.zhipin.com/web/geek/recommend\"]",
+  "viewConversationSelector": ".chat-conversation .user-info",
+  "viewPositionSelector": ".chat-position-content",
+  "viewSelectionSelector": ".chat-conversation .user-info-wrap",
+  "messagesContainer": ".chat-record .chat-message .im-list",
+  "messageSelector": "li.message-item:has(.message-content)",
+  "messageTextSelector": ".message-content",
+  "outgoingSelector": ".item-myself",
+  "incomingSelector": ".item-friend",
+  "inputSelector": "#chat-input"
+}
