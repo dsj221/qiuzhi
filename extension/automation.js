@@ -277,8 +277,9 @@ window.startJobAutomation=function(engine){
     }
     if(workbench(tab.url)&&route.searchParams.has('review'))return;
     const settings=await api('SEARCH');current(token);
-    if(!settings.resume_revision||!settings.search_plan.entries.length){step('batch','等待工作台保存简历和筛选条件');return;}
-    const key=[new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'}),settings.preferences.revision,settings.resume_revision].join('/');
+    if(!settings.resume_revision||!settings.search_plan.entries.length){step('batch',settings.search_plan.warnings?.join('。')||'等待工作台保存简历和筛选条件');return;}
+    if(settings.model_enabled===false){step('batch','等待在工作台设置匹配 API Key');return;}
+    const key=[settings.matching_version||'',new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Shanghai'}),settings.preferences.revision,settings.resume_revision].join('/');
     if(config.lastSearch!==key){
       if(!official(tab.url)||route.pathname!=='/web/geek/jobs'){
         step('batch','正在打开真实岗位搜索');

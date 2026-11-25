@@ -9,11 +9,27 @@
   async function until(read,epoch,tries=20){let last;for(let i=0;i<tries;i++){check(epoch);try{return await read();}catch(error){last=error;if(/登录|验证|账号|后台|当前标签页已变化/.test(error.message))throw error;}await sleep(300);}throw last||Error('页面未就绪');}
   async function select(key,epoch){await pipe('PIPE_SELECT',{external_id:key},epoch);return until(async()=>{const current=await pipe('PIPE_CURRENT',{},epoch);if(current.job.external_id!==key)throw Error('岗位详情正在切换');return current;},epoch);}
   function listUrl(value){const url=new URL(value);if(url.username||url.password||url.hash||!(url.origin==='https://www.zhipin.com'&&url.pathname==='/web/geek/jobs'||url.origin==='http://127.0.0.1:8766'&&url.pathname==='/boss-fixture'))throw Error('搜索来源不是受支持的官方岗位列表');return url.href;}
-  async function navigate(value,epoch){
+  function sameSearch(actual,expected){
+    const a=new URL(actual),b=new URL(expected);
+    a.searchParams.sort();b.searchParams.sort();
+    return a.href===b.href;
+  }
+  async function navigate(value,epoch,entry=null){
     const url=listUrl(value);check(epoch);
     const [active]=await chrome.tabs.query({active:true,currentWindow:true});if(active?.id!==operationTab)throw Error('当前标签页已变化，任务已停止');
     await chrome.tabs.update(operationTab,{url});
-    return until(async()=>{const tab=await chrome.tabs.get(operationTab);if(tab.status!=='complete')throw Error('搜索页面正在加载');if(tab.url!==url)throw Error('搜索地址已变化，请核对页面');const listing=await pipe('PIPE_LIST',{},epoch);if(listing.list_url!==url)throw Error('搜索页面尚未切换完成');return listing;},epoch,60);
+    return until(async()=>{
+      const tab=await chrome.tabs.get(operationTab);
+      if(tab.status!=='complete')throw Error('搜索页面正在加载');
+      if(!sameSearch(tab.url,url))throw Error('搜索地址已变化，请核对页面');
+      const listing=await pipe('PIPE_LIST',{},epoch);
+      if(!sameSearch(listing.list_url,url))throw Error('搜索页面尚未切换完成');
+      if(entry&&Object.hasOwn(entry,'district')){
+        const region=entry.city+entry.district;
+        if(!listing.page_title?.includes('「'+region+'招聘」'))throw Error('BOSS 页面尚未确认工作地区为'+region);
+      }
+      return listing;
+    },epoch,60);
   }
   async function chat(action,epoch,url='https://www.zhipin.com/web/geek/chat'){
     check(epoch);const target=new URL(url);
@@ -39,13 +55,13 @@
   async function refreshBatches(){const data=await api('APPLICATIONS');q('#application-batch').replaceChildren(new Option('选择已确认批次',''),...data.batches.map(b=>new Option(`${b.id.slice(0,8)} · ${b.mode==='resume'?'发送指定简历':'打招呼'} · ${data.items.filter(i=>i.batch_id===b.id).length} 个待处理`,b.id)));return data;}
   async function begin(work){if(busy)return;busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
   async function search(epoch,settings,expectedTab=null,expectedAccount=null){
-    const plan=settings.search_plan;if(!plan?.entries.length)throw Error('请先在工作台保存筛选条件');
+    const plan=settings.search_plan;if(!plan?.entries.length)throw Error(plan?.warnings?.join('。')||'请先在工作台保存筛选条件');
     const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if((expectedTab!==null&&expectedTab!==operationTab)||(expectedAccount&&expectedAccount!==context.account_label))throw Error('自动搜索的账号或标签页已变化');if(profile.jobSelector==='#fixture-job')throw Error('模拟配置仅支持采集模拟列表；搜索真实岗位前请使用已验证的岗位列表配置');
     const counts={read:0,matched:0,review:0,ids:[]},seen=new Set();
     for(let i=0;i<plan.entries.length;i++){
-      const entry=plan.entries[i];check(epoch);say(`正在搜索 ${i+1}/${plan.entries.length}：${entry.title} · ${entry.city}`);
+      const entry=plan.entries[i];check(epoch);say(`正在搜索 ${i+1}/${plan.entries.length}：${entry.title} · ${[entry.city,entry.district].filter(Boolean).join('·')}`);
       if(i>0&&(await api('SEARCH')).preferences.revision!==settings.preferences.revision)throw Error('筛选条件已更新，请重新启动搜索');check(epoch);
-      const listing=await navigate(entry.url,epoch);if(listing.account_label!==context.account_label)throw Error('显示账号已变化');
+      const listing=await navigate(entry.url,epoch,entry);if(listing.account_label!==context.account_label)throw Error('显示账号已变化');
       await collectListing(listing,settings,epoch,seen,counts);
     }
     await jobs();return {counts,plan,context};

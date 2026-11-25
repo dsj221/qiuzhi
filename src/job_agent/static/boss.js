@@ -37,6 +37,14 @@
     if(button.hasAttribute('data-open-boss-connections')){$('#boss-modal-error').classList.add('hidden');$('#boss-modal').showModal();void load().catch(modalError);return;}
     if(button.id==='boss-modal-close'){$('#boss-modal').close();return;}
     if(button.id==='boss-open'){
+      if(!$('#jobs-view').classList.contains('hidden')){
+        const link=$('#search-plan-links a');
+        if(link){link.click();return;}
+        if($('#search-preferences-form').elements.titles.value.trim()){
+          const form=$('#search-preferences-form');
+          form.requestSubmit(form.querySelector('[value="search"]'));return;
+        }
+      }
       const popup=window.open('https://www.zhipin.com/web/user/','job-agent-boss','popup=yes,width=1180,height=820');
       if(popup){popup.opener=null;$('#boss-window-status').textContent='已请求打开 BOSS 登录窗口；登录后请用 Chrome 扩展配对。';}
       else{$('#boss-window-status').innerHTML='弹窗被拦截，<a href="https://www.zhipin.com/web/user/" target="_blank" rel="noopener noreferrer">点击新标签页打开 BOSS ↗</a>。';}

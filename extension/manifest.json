@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "求职 Agent · BOSS 本地连接器",
-  "version": "0.8.0",
+  "version": "0.8.2",
   "description": "按工作台筛选条件搜索BOSS岗位，匹配并收藏机会，同步本人会话，执行已核对的有限投递批次并记录平台回执。",
   "minimum_chrome_version": "116",
   "permissions": [

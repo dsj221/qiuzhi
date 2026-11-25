@@ -44,7 +44,7 @@ function renderDetail() {
     const req=job.requirements.find(r=>r.id===row.requirement_id);
     return `<article class="report-row"><header><h3>${esc(req.text)}</h3><span class="badge ${row.status==='met'?'green':row.status==='unknown'?'':'amber'}">${evidenceStatuses[row.status]}</span></header><p>${esc(row.reason)}</p>${evidenceHTML(row.evidence)}</article>`;
   }).join(''):job.requirements.map(r=>`<article class="report-row"><h3>${esc(r.text)}</h3><p>关键词：${esc(r.keywords.join('、'))} · 权重 ${r.weight}</p></article>`).join('');
-  $('#job-detail').innerHTML=`<div class="detail-top"><div><h2>${esc(job.title)}</h2><p>${esc(job.company)}${job.city?' · '+esc(job.city):''}</p></div><button class="primary" data-assess="${esc(job.id)}" ${!state.profile||job.requirements_need_review?'disabled':''}>${report?'重新匹配':'开始匹配'}</button></div>${!state.profile?'<div class="notice">请先在“我的简历”保存个人经历，再开始匹配。</div>':''}${job.url?`<a href="${esc(job.url)}" target="_blank" rel="noopener noreferrer">查看原始岗位 ↗</a>`:''}${report?`<div class="score-panel"><div><span class="big-score">${report.score??'—'}</span><p>证据参考分 / 100</p></div><div><h3>证据覆盖 ${Math.round(report.coverage*100)}%</h3><p>未验证的要求不计零分，也不代表不适合。</p><p>${report.engine==='model'?'模型辅助分析':'本地关键词规则'} · 简历版本 ${report.resume_revision}</p></div></div><div class="notice">${esc(report.warning)}</div>`:'<div class="notice">逐条核对简历与岗位要求，保留可回看的原文证据。</div>'}${rows}${job.description?`<details><summary>查看岗位描述</summary><p class="jd">${esc(job.description)}</p></details>`:''}<div class="actions"><button class="secondary" data-prepare="${esc(job.id)}" ${!report?'disabled':''}>准备面试与沟通</button><button class="text-button danger" data-delete="${esc(job.id)}">删除岗位</button></div><form id="tracking-form" class="tracking-form"><h3>记录当前进度</h3><div class="form-grid"><label>投递状态<select name="status">${Object.entries(statuses).map(([k,v])=>`<option value="${k}" ${k===job.status?'selected':''}>${v}</option>`).join('')}</select></label><label>下次跟进日期<input name="followup_date" type="date" value="${esc(job.followup_date)}"></label></div><label>跟进备注<textarea name="notes" rows="3" maxlength="5000" placeholder="例如：已约周五电话沟通，提前整理项目经历。">${esc(job.notes)}</textarea></label><button class="secondary" type="submit">保存进度</button></form><ul class="history">${job.history.slice().reverse().map(h=>`<li>${esc(dateTime(h.at))} · ${statuses[h.status]}</li>`).join('')}</ul>`;
+  $('#job-detail').innerHTML=`<div class="detail-top"><div><h2>${esc(job.title)}</h2><p>${esc(job.company)}${job.city?' · '+esc(job.city):''}</p></div><button class="primary" data-assess="${esc(job.id)}" ${!state.profile||job.requirements_need_review?'disabled':''}>${report?'重新匹配':'开始匹配'}</button></div>${!state.profile?'<div class="notice">请先在“我的简历”保存个人经历，再开始匹配。</div>':''}${job.url?`<a href="${esc(job.url)}" target="_blank" rel="noopener noreferrer">查看原始岗位 ↗</a>`:''}${report?`<div class="score-panel"><div><span class="big-score">${report.score??'—'}</span><p>证据参考分 / 100</p></div><div><h3>证据覆盖 ${Math.round(report.coverage*100)}%</h3><p>未验证的要求不计零分，也不代表不适合。</p><p>${report.engine==='model'?'API · '+esc(report.model):'历史关键词评分，需重新匹配'} · 简历版本 ${report.resume_revision}</p></div></div><div class="notice">${esc(report.warning)}</div>`:'<div class="notice">逐条核对简历与岗位要求，保留可回看的原文证据。</div>'}${rows}${job.description?`<details><summary>查看岗位描述</summary><p class="jd">${esc(job.description)}</p></details>`:''}<div class="actions"><button class="secondary" data-prepare="${esc(job.id)}" ${!report?'disabled':''}>准备面试与沟通</button><button class="text-button danger" data-delete="${esc(job.id)}">删除岗位</button></div><form id="tracking-form" class="tracking-form"><h3>记录当前进度</h3><div class="form-grid"><label>投递状态<select name="status">${Object.entries(statuses).map(([k,v])=>`<option value="${k}" ${k===job.status?'selected':''}>${v}</option>`).join('')}</select></label><label>下次跟进日期<input name="followup_date" type="date" value="${esc(job.followup_date)}"></label></div><label>跟进备注<textarea name="notes" rows="3" maxlength="5000" placeholder="例如：已约周五电话沟通，提前整理项目经历。">${esc(job.notes)}</textarea></label><button class="secondary" type="submit">保存进度</button></form><ul class="history">${job.history.slice().reverse().map(h=>`<li>${esc(dateTime(h.at))} · ${statuses[h.status]}</li>`).join('')}</ul>`;
   window.renderBossPanel?.(job);
 }
 function renderTracking() {
@@ -78,7 +78,7 @@ async function refresh(fillProfile=false) {
   state=await api('/api/overview');
   if(!state.jobs.some(j=>j.id===selected))selected=state.jobs[0]?.id||'';
   if(!state.jobs.some(j=>j.id===prepKey))prepKey=selected;
-  $('#model-mode').textContent=state.model_enabled?'模型已配置':'本地规则模式';
+  $('#model-mode').textContent=state.model_enabled?'匹配 API · '+state.model_name:'匹配 API · 待配置';
   $('#demo-button').classList.toggle('hidden',!!state.profile||state.jobs.length>0);
   $('#prep-job').innerHTML=jobOptions(prepKey);
   renderStats(); renderList(); renderDetail(); renderTracking();
@@ -91,6 +91,7 @@ async function busy(button, work) {
 }
 document.addEventListener('click', event=>{
   const button=event.target.closest('button'); if(!button)return;
+  if(button.closest('#model-settings')||button.id==='model-mode')return;
   if(button.dataset.view){switchView(button.dataset.view);return;}
   if(button.dataset.select){selected=button.dataset.select; renderList();renderDetail();return;}
   if(button.id==='new-job'){ $('#modal-error').classList.add('hidden');$('#job-modal').showModal();return; }
@@ -105,6 +106,23 @@ document.addEventListener('click', event=>{
     if(button.hasAttribute('data-return-job')){selected=prepKey;renderList();renderDetail();switchView('jobs');}
     if(button.id==='copy-greeting'){await navigator.clipboard.writeText(prepData.greeting);toast('沟通草稿已复制');}
   });
+});
+$('#model-mode').onclick=()=>{
+  $('#model-error').textContent='';
+  $('#model-info').textContent='当前模型 '+(state.model_name||'deepseek-flash')+(state.model_enabled?'，已配置密钥。':'，等待设置密钥。');
+  $('#model-settings').showModal();
+};
+$('#model-close').onclick=()=>$('#model-settings').close();
+$('#model-settings').addEventListener('close',()=>$('#model-key-form').reset());
+$('#model-key-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const button=event.submitter;
+  button.disabled=true;
+  try{
+    await api('/api/model/key','PUT',{key:event.target.elements.key.value.trim()});
+    $('#model-settings').close();await refresh();toast('匹配 API 密钥已保存');
+  }catch(error){$('#model-error').textContent=error.message;}
+  finally{button.disabled=false;}
 });
 $('#profile-form').addEventListener('submit',event=>{event.preventDefault();void busy(event.submitter,async()=>{const data=Object.fromEntries(new FormData(event.target));await api('/api/profile','PUT',data);prepData=null;await refresh(true);toast('简历已保存；岗位报告需重新匹配');});});
 $('#job-form').addEventListener('submit',event=>{event.preventDefault();void busy(event.submitter,async()=>{

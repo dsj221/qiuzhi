@@ -4,6 +4,7 @@ import json
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlencode, urlsplit
 
@@ -16,6 +17,7 @@ from .service import require
 class SearchPreferences(BaseModel):
     titles: List[str] = Field(default_factory=list, max_length=10)
     cities: List[str] = Field(default_factory=list, max_length=10)
+    districts: List[str] = Field(default_factory=list, max_length=20)
     min_salary_k: Optional[float] = Field(default=None, ge=0, le=500)
     accept_internship: bool = False
     accept_other_cities: bool = False
@@ -46,26 +48,41 @@ class CollectionInput(BaseModel):
     preferences_revision: Optional[int] = Field(default=None, ge=1)
 
 
-BOSS_CITIES = {'上海': '101020100', '杭州': '101210100', '合肥': '101220100',
-               '北京': '101010100', '广州': '101280100', '深圳': '101280600', '成都': '101270100'}
+BOSS_REGIONS = json.loads((Path(__file__).parent / 'static' / 'boss-regions.json').read_text(encoding='utf-8'))
+
+
+def search_regions(prefs):
+    """Resolve city-qualified districts before opening any platform search."""
+    cities = {c.strip().removesuffix('市'): [] for c in prefs['cities']}
+    warnings = [f'暂不支持城市「{c}」，请从工作城市列表选择' for c in cities if c not in BOSS_REGIONS]
+    for value in prefs.get('districts', []):
+        parent, sep, name = value.rpartition('·')
+        matches = [c for c in cities if name.strip() in BOSS_REGIONS.get(c, {}).get('districts', {})
+                   and (not sep or parent.strip().removesuffix('市') == c)]
+        if len(matches) != 1:
+            warnings.append(f'请核对工作区县「{value}」及所属城市，同名区县可填写“城市·区县”')
+        elif name.strip() not in cities[matches[0]]:
+            cities[matches[0]].append(name.strip())
+    return cities, warnings
 
 
 def search_plan(prefs):
-    """Search broadly on the official page; exact requirements remain local screening rules."""
+    """Apply the saved city and district on the official search page."""
     if not prefs['revision']:
         return {'entries': [], 'total': 0, 'warnings': []}
-    cities = ['全国'] if prefs['accept_other_cities'] else prefs['cities']
-    entries, warnings, seen = [], [], set()
+    cities, warnings = search_regions(prefs)
+    entries = []
+    regions = [(c, d) for c, districts in cities.items() for d in districts or ['']] if not warnings else []
+    if prefs['accept_other_cities'] and not warnings:
+        regions.append(('全国', ''))
     for title in prefs['titles']:
-        for city in cities:
-            code = BOSS_CITIES.get(city.removesuffix('市'))
-            if city != '全国' and not code:
-                warnings.append(city + '暂未配置平台城市代码，将全国搜索后按意向城市严格筛选')
-            url = 'https://www.zhipin.com/web/geek/jobs?' + urlencode({'query': title, 'city': code or '100010000'})
-            if url in seen:
-                continue
-            seen.add(url)
-            entries.append({'title': title, 'city': city if code else '全国', 'url': url})
+        for city, district in regions:
+            params = {'city': '100010000' if city == '全国' else BOSS_REGIONS[city]['code']}
+            if district:
+                params['multiBusinessDistrict'] = BOSS_REGIONS[city]['districts'][district]
+            params['query'] = title
+            url = 'https://www.zhipin.com/web/geek/jobs?' + urlencode(params)
+            entries.append({'title': title, 'city': city, 'district': district, 'url': url})
     limit = prefs.get('search_limit', 5)
     return {'entries': entries[:limit], 'total': len(entries), 'warnings': list(dict.fromkeys(warnings)),
             'per_search_limit': prefs['limit'], 'preferences_revision': prefs['revision']}
@@ -82,15 +99,6 @@ def validate_search_url(value, source):
         require(url.scheme == 'https' and url.netloc == 'www.zhipin.com' and url.path == '/web/geek/jobs', '搜索来源必须为BOSS官方岗位列表', 422)
 
 
-SKILLS = [
-    'Python', 'C++', 'Java', 'JavaScript', 'TypeScript', 'Golang', 'SQL', 'MySQL', 'PostgreSQL',
-    'SQLite', 'Redis', 'FastAPI', 'Flask', 'Django', 'React', 'Vue', 'Node.js', 'Git', 'Docker',
-    'Kubernetes', 'Linux', 'LangChain', 'LangGraph', 'RAG', 'Agent', 'Dify', 'LLM', 'PyTorch',
-    'TensorFlow', '机器学习', '深度学习', '大模型', '数据分析', '自动化', '产品设计', '用户研究',
-    'CAD', 'SolidWorks', 'CATIA', 'Creo', 'SLAM', '项目管理', '测试',
-]
-
-
 def canonical(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -105,18 +113,6 @@ def validate_source(job):
     return 'fixture'
 
 
-def requirements_from_jd(text):
-    """Draft extraction of literal skills, not a claim of semantic JD understanding."""
-    result = []
-    for skill in SKILLS:
-        pattern = r'(?<![A-Za-z0-9])' + re.escape(skill) + r'(?![A-Za-z0-9])' if skill.isascii() else re.escape(skill)
-        if re.search(pattern, text, re.I):
-            result.append({'id': 'R' + str(len(result) + 1), 'text': '岗位原文提及 ' + skill, 'keywords': [skill], 'weight': 3})
-            if len(result) == 8:
-                break
-    return result
-
-
 class Opportunities:
     def __init__(self, service, connector):
         self.service, self.connector = service, connector
@@ -125,11 +121,13 @@ class Opportunities:
         return {**SearchPreferences().model_dump(), **(db.get('meta', 'search-preferences') or {'id': 'search-preferences', 'revision': 0})}
 
     def save_preferences(self, data):
-        for field in ('titles', 'cities', 'excluded_companies', 'required_keywords'):
+        for field in ('titles', 'cities', 'districts', 'excluded_companies', 'required_keywords'):
             require(all(1 <= len(v.strip()) <= 80 for v in data[field]), '筛选项每项应为1至80字', 422)
             data[field] = list(dict.fromkeys(v.strip() for v in data[field]))
         require(bool(data['titles']), '请填写至少一个目标岗位', 422)
         require(data['accept_other_cities'] or bool(data['cities']), '请填写意向城市，或明确允许异地岗位', 422)
+        _, warnings = search_regions(data)
+        require(not warnings, '。'.join(warnings), 422)
         with self.service.store.transaction() as db:
             old = self.preferences(db)
             value = {'id': 'search-preferences', **data, 'revision': old['revision'] + 1, 'updated_at': time.time()}
@@ -147,13 +145,22 @@ class Opportunities:
             excluded.append('岗位名称不符合目标方向')
         else:
             reasons.append('岗位名称符合目标方向')
-        if not prefs['accept_other_cities']:
-            if not job['city']:
+        cities, region_errors = search_regions(prefs)
+        if region_errors:
+            pending.extend(region_errors)
+        elif cities or not prefs['accept_other_cities']:
+            location = re.split(r'[·•\s]+', job['city'].strip())
+            city = location[0].removesuffix('市')
+            if not city:
                 pending.append('工作城市尚未核验')
-            elif not any(c.casefold() in job['city'].casefold() for c in prefs['cities']):
+            elif city not in cities and not prefs['accept_other_cities']:
                 excluded.append('不在意向城市范围')
+            elif cities.get(city) and len(location) < 2:
+                pending.append('工作区县尚未核验')
+            elif cities.get(city) and location[1] not in cities[city]:
+                excluded.append('不在所选工作区县')
             else:
-                reasons.append('城市符合筛选条件')
+                reasons.append('工作区县符合筛选条件' if cities.get(city) else '城市符合筛选条件')
         if not prefs['accept_internship'] and '实习' in haystack:
             excluded.append('已排除实习岗位')
         if any(c.casefold() in job['company'].casefold() for c in prefs['excluded_companies']):
@@ -168,28 +175,32 @@ class Opportunities:
         missing = [k for k in prefs['required_keywords'] if k.casefold() not in haystack.casefold()]
         if missing:
             excluded.append('岗位缺少必需关键词：' + '、'.join(missing))
-        requirements = requirements_from_jd(job['description'])
-        report = None
+        requirements, report = [], None
         if len(job['description'].strip()) < 20:
             pending.append('缺少完整岗位正文')
-        elif not requirements:
-            pending.append('未能从岗位正文提取可核对的技能，请人工查看')
         elif not profile:
             pending.append('请先保存我的简历')
-        else:
-            report = self.service.model.assess(requirements, [{'id': 'my-resume', 'text': profile['text']}])
+        elif not excluded and not pending:
+            requirements, report = self.service.model.matching(
+                None, [{'id': 'my-resume', 'text': profile['text']}], description=job['description'])
             if report['score'] is None or report['coverage'] < prefs['min_coverage']:
-                pending.append('简历证据覆盖不足，需人工核对')
+                pending.append('API 匹配缺少可核对的简历证据')
             elif report['score'] < prefs['min_score']:
-                excluded.append('参考分低于筛选阈值')
+                excluded.append('API 匹配参考分低于筛选阈值')
             else:
-                reasons.append('简历证据达到所设匹配阈值')
+                reasons.append('API 匹配证据达到所设阈值')
         return {'result': 'excluded' if excluded else 'review' if pending else 'matched', 'reasons': reasons,
                 'excluded_reasons': excluded, 'review_reasons': pending, 'requirements': requirements, 'report': report}
 
     def favorite_in(self, db, value):
         existing = next((j for j in db.all('job') if j.get('source') == value['source'] and j.get('boss_external_id') == value['external_id']), None)
         if existing:
+            if existing.get('requirements_origin') in {'literal-jd-skills', 'model-jd'} and value['screening']['report']:
+                existing.update(requirements=value['screening']['requirements'], requirements_origin='model-jd',
+                                description=value['description'], requirements_need_review=False,
+                                report={**value['screening']['report'], 'resume_revision': value['resume_revision'],
+                                        'created_at': time.time()})
+                db.put('job', existing)
             value['favorite_id'] = existing['id']
             return existing
         report = value['screening']['report']
@@ -197,7 +208,7 @@ class Opportunities:
             report = {**report, 'resume_revision': value['resume_revision'], 'created_at': time.time()}
         job = {k: value[k] for k in ('title', 'company', 'city', 'url', 'description', 'source', 'salary_text')}
         job.update(id=uuid.uuid4().hex, boss_external_id=value['external_id'], requirements=value['screening']['requirements'],
-                   report=report, requirements_need_review=not bool(value['screening']['requirements']), requirements_origin='literal-jd-skills',
+                   report=report, requirements_need_review=not bool(value['screening']['requirements']), requirements_origin='model-jd',
                    created_at=time.time(), status='saved', followup_date='', notes='', history=[{'status': 'saved', 'at': time.time()}])
         db.put('job', job)
         value['favorite_id'] = job['id']
@@ -218,7 +229,7 @@ class Opportunities:
             if job.get('salary_min_k') is not None and job.get('salary_max_k') is not None:
                 require(job['salary_min_k'] <= job['salary_max_k'], '薪资范围无效', 422)
             screened = self.screen(job, profile, prefs)
-            value = {**job, 'id': canonical([source, job['external_id']]), 'source': source, 'connection_id': key,
+            value = {**job, 'matching_version': 'api-v2', 'id': canonical([source, job['external_id']]), 'source': source, 'connection_id': key,
                      'content_hash': canonical(job), 'resume_revision': profile['revision'] if profile else None,
                      'search_url': search_url,
                      'preferences_revision': prefs['revision'], 'screening': screened, 'captured_at': time.time()}
@@ -248,7 +259,7 @@ class Opportunities:
             prefs = self.preferences(db)
             values = db.all('opportunity')[::-1]
             for value in values:
-                value['stale'] = bool(value.get('jd_outdated')) or value['resume_revision'] != (profile['revision'] if profile else None) or value['preferences_revision'] != prefs['revision']
+                value['stale'] = value.get('matching_version') != 'api-v2' or bool(value.get('jd_outdated')) or value['resume_revision'] != (profile['revision'] if profile else None) or value['preferences_revision'] != prefs['revision']
             return {'preferences': prefs, 'search_plan': search_plan(prefs), 'opportunities': values, 'has_resume': bool(profile),
                     'demo_resume': bool(profile and (profile.get('is_demo') or profile.get('name') == '演示求职者'))}
 
@@ -277,7 +288,8 @@ def mount_opportunities(app, service, connector, admin):
             prefs = opportunities.preferences(db)
             profile = db.get('profile', 'me')
             return {'preferences': prefs, 'search_plan': search_plan(prefs),
-                    'resume_revision': profile['revision'] if profile else None}
+                    'resume_revision': profile['revision'] if profile else None,
+                    'model_enabled': service.model.enabled, 'matching_version': 'api-v2/region-v1'}
 
     @app.post('/api/connector/{key}/opportunities')
     def collect(key: str, data: CollectionInput, request: Request):

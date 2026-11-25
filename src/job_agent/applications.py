@@ -78,6 +78,14 @@ class Applications:
     def __init__(self, service, connector, opportunities):
         self.service, self.connector, self.opportunities = service, connector, opportunities
         with service.store.transaction() as db:
+            for batch in db.all('application_batch'):
+                if batch['state'] in {'DRAFT', 'APPROVED', 'RUNNING'} and batch.get('matching_version') != 'api-v2':
+                    batch['state'] = 'NEEDS_REVIEW'
+                    db.put('application_batch', batch)
+                    for pending in db.all('application_item'):
+                        if pending['batch_id'] == batch['id'] and pending['state'] in {'DRAFT', 'PENDING'}:
+                            pending.update(state='CANCELLED', reason='已切换到 API 匹配，请重新筛选')
+                            db.put('application_item', pending)
             for item in db.all('application_item'):
                 if item['state'] == 'RUNNING':
                     item.update(state='UNKNOWN', reason='服务重启前的执行结果不明，请查看平台，不会自动重试')
@@ -130,12 +138,14 @@ class Applications:
         require(profile is not None, '请先保存我的简历')
         prefs = self.opportunities.preferences(db)
         batch_id = uuid.uuid4().hex
-        batch = {'id': batch_id, **data, 'state': 'DRAFT', 'resume_revision': profile['revision'],
+        batch = {'id': batch_id, **data, 'matching_version': 'api-v2', 'state': 'DRAFT', 'resume_revision': profile['revision'],
                  'preferences_revision': prefs['revision'], 'created_at': time.time()}
         items = []
         for key in data['opportunity_ids']:
             opportunity = self.service.entity(db, 'opportunity', key)
             require(opportunity['connection_id'] == connection['id'], '所选岗位来自不同连接，请分批处理')
+            require(opportunity.get('matching_version') == 'api-v2' and
+                    (opportunity['screening'].get('report') or {}).get('engine') == 'model', '请使用匹配 API 重新筛选岗位')
             require(not opportunity.get('jd_outdated'), '岗位JD已更新，请重新采集并筛选')
             require(opportunity['screening']['result'] == 'matched', '只允许将符合已设筛选条件的岗位加入自动投递')
             require(opportunity['resume_revision'] == profile['revision'] and opportunity['preferences_revision'] == prefs['revision'], '岗位匹配已过期，请重新筛选')

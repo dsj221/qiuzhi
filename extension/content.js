@@ -16,7 +16,7 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else if(message.type==='UNBIND_CHAT'){adapter.clearView();reply({ok:true,data:{ok:true}});}
     else if(message.type==='FILL')reply({ok:true,data:adapter.fill(message.action,message.expected,message.manual_confirmed===true)});
     else if(message.type==='PIPE_ACCOUNT'){pipeline.guard();if(document.hidden)throw Error('页面在后台，已停止');reply({ok:true,data:{account_label:pipeline.accountLabel()}});}
-    else if(message.type==='PIPE_LIST')reply({ok:true,data:{jobs:pipeline.list(),account_label:pipeline.accountLabel(),list_url:document.location.href}});
+    else if(message.type==='PIPE_LIST')reply({ok:true,data:{jobs:pipeline.list(),account_label:pipeline.accountLabel(),list_url:document.location.href,page_title:document.title}});
     else if(message.type==='PIPE_SELECT')reply({ok:true,data:pipeline.select(message.external_id)});
     else if(message.type==='PIPE_CURRENT')reply({ok:true,data:pipeline.current()});
     else if(message.type==='PIPE_OPEN')reply({ok:true,data:pipeline.open(message.action)});

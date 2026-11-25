@@ -128,7 +128,7 @@ def create_app(directory=None, testing=False):
 
     @app.get("/static/{name}")
     def asset(name: str):
-        require(name in {"app.js", "style.css", "boss.js", "boss.css", "boss-adapter.js", "pipeline-adapter.js", "pipeline-fixture.js", "boss-fixture.js", "fixture-profile.json", "opportunities.js", "opportunities.css"}, "文件不存在", 404)
+        require(name in {"app.js", "style.css", "boss.js", "boss.css", "boss-adapter.js", "pipeline-adapter.js", "pipeline-fixture.js", "boss-fixture.js", "fixture-profile.json", "boss-regions.json", "opportunities.js", "opportunities.css"}, "文件不存在", 404)
         media = "text/css" if name.endswith("css") else "application/json" if name.endswith("json") else "application/javascript"
         return Response((static / name).read_text(), media_type=media)
 
