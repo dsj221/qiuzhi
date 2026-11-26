@@ -8,8 +8,10 @@ window.startJobAutomation=function(engine){
   const workbench=url=>url?.startsWith('http://127.0.0.1:8766/');
   const reviewURL=id=>'http://127.0.0.1:8766/?review='+encodeURIComponent(id)+'#jobs';
   let config=null,epoch=0,polling=false,lastImport='',nextNetwork=0,closing=false;
+  let compatible=false,nextVersionCheck=0;
   const presented=new Set();
-  let chatSession=null,unreadable=null,diagnosed='';
+  let chatSession=null,unreadable=null,diagnosed='',flowTab=null;
+  const chatURL='https://www.zhipin.com/web/geek/chat';
   const step=(id,message)=>{$('#step-'+id).textContent=message;};
   function current(token){if(!enabled()||epoch!==token||closing)throw Error('自动化已暂停');}
   function controls(){
@@ -18,7 +20,7 @@ window.startJobAutomation=function(engine){
     $('#automatic-resume-field').hidden=mode.value!=='resume';
   }
   async function disable(reason='自动化已关闭'){
-    epoch++;config=null;lastImport='';chatSession=null;unreadable=null;presented.clear();controls();
+    epoch++;config=null;compatible=false;nextVersionCheck=0;lastImport='';chatSession=null;unreadable=null;flowTab=null;presented.clear();controls();
     await Promise.all([engine.halt(),chrome.storage.local.remove('jobAutomation')]);
     report(reason);
   }
@@ -35,7 +37,8 @@ window.startJobAutomation=function(engine){
   }
   async function waitForAccount(id){
     let error;
-    for(let attempt=0;attempt<40;attempt++){
+    const deadline=Date.now()+15000;
+    for(let attempt=0;attempt<40&&Date.now()<deadline;attempt++){
       if((await activeTab())?.id!==id)throw Error('页面已切换');
       try{return await page('PIPE_ACCOUNT',{},id);}catch(e){error=e;}
       await new Promise(resolve=>setTimeout(resolve,300));
@@ -47,6 +50,7 @@ window.startJobAutomation=function(engine){
     if(!toggle.checked){await disable();return;}
     toggle.disabled=true;
     try{
+      step('batch','等待本轮筛选');
       step('pair','正在连接本机工作台');
       const pairing=await pairWorkbench();
       await jobs();step('pair','已配对，岗位列表已刷新');
@@ -57,6 +61,7 @@ window.startJobAutomation=function(engine){
       let tab=await activeTab();
       if(!official(tab?.url))tab=await openSearch(settings);
       const account=await waitForAccount(tab.id);
+      flowTab=tab.id;
       stop();bound=null;$('#fill-now').hidden=true;
       config={workflowVersion:2,connection:pairing.connection_id,account:account.account_label,mode:mode.value,
         resume:resume.value.trim(),lastSearch:''};
@@ -74,7 +79,12 @@ window.startJobAutomation=function(engine){
       for(let i=0;i<60;i++){
         const current=await chrome.tabs.get(tab.id);
         if(current.url===url&&current.status==='complete'){
-          const result=await chrome.tabs.sendMessage(tab.id,{type:'CREATE_LOCAL_PAIR'});
+          // Wait for the listener without repeating a pairing request.
+          const probe=await extensionMessage(()=>chrome.tabs.sendMessage(tab.id,{type:'PAIR_READY'},{frameId:0}),
+            true,'本机工作台页面');
+          if(!probe?.ready)throw Error('工作台配对表单尚未就绪');
+          const result=await extensionMessage(()=>chrome.tabs.sendMessage(tab.id,{type:'CREATE_LOCAL_PAIR'},{frameId:0}),
+            false,'本机工作台页面');
           if(!result?.value)throw Error(result?.error||'工作台未返回配对凭证');
           const stored=await chrome.runtime.sendMessage({type:'SAVE_PAIR',value:result.value});
           if(!stored?.ok)throw Error(stored?.error||'配对保存失败');
@@ -200,7 +210,10 @@ window.startJobAutomation=function(engine){
   }
   async function run(tab,settings,key,token){
     const success=await engine.begin(async operation=>{
-      const {counts}=await engine.search(operation,settings,tab.id,config.account);
+      flowTab=tab.id;
+      const progress=message=>{current(token);step('batch',message);report(message);engine.status(message);};
+      progress('正在准备本轮岗位筛选');
+      const {counts}=await engine.search(operation,settings,tab.id,config.account,progress);
       current(token);engine.check(operation);
       const result=await api('AUTO_DRAFTS',{opportunity_ids:counts.ids,preferences_revision:settings.preferences.revision,
         resume_revision:settings.resume_revision,account_label:config.account,mode:config.mode,resume_label:config.mode==='resume'?config.resume:''});
@@ -209,9 +222,10 @@ window.startJobAutomation=function(engine){
       const message='搜索完成，读取 '+counts.read+' 个岗位，符合 '+counts.matched+' 个，待核对 '+counts.review+' 个，生成 '+result.batches.length+(result.auto_greeting?' 个自动招呼批次。':' 个待确认批次。');
       step('batch',message);report(message);engine.status(message);
       try{lastImport=(await page('PIPE_CURRENT',{},tab.id)).job.external_id;}catch{}
-    });
+    },{resumeSearch:true});
     if(success===false&&enabled()){
       const message=$('#pipeline-status').textContent;
+      step('batch',message);
       await disable('自动搜索暂停。'+message);
     }
   }
@@ -224,9 +238,26 @@ window.startJobAutomation=function(engine){
     const now=Date.now();
     const pairing=await api('STATUS');current(token);
     if(pairing.connection_id!==config.connection)throw Error('配对连接已改变，请重新开启自动化');
+    if(!compatible){
+      if(now<nextVersionCheck)return;
+      nextVersionCheck=now+5000;
+      let capabilities;
+      try{capabilities=await api('FOLLOW_TARGETS');}
+      catch(error){
+        if(!/Failed to fetch|NetworkError|未收到本机工作台响应/i.test(error.message))throw error;
+        report('等待本机工作台重新上线，连接恢复后自动继续。');return;
+      }
+      current(token);
+      if(!Array.isArray(capabilities.threads)){
+        report('等待工作台升级至 0.10.0，升级完成后会自动开始。');return;
+      }
+      compatible=true;
+      report('工作台已连接，全流程已启动。');
+    }
     const route=new URL(tab.url);
     if(official(tab.url)){
       await assertAccount(tab,token);
+      if(flowTab===null&&['/web/geek/jobs','/web/geek/chat'].includes(route.pathname))flowTab=tab.id;
       const locationKey=tab.id+':'+route.pathname;
       if(diagnosed!==locationKey){
         const structure=await page('INSPECT',{},tab.id);current(token);
@@ -234,7 +265,12 @@ window.startJobAutomation=function(engine){
         step('profile','已诊断 '+structure.path.split('/').slice(0,3).join('/'));
         diagnosed=locationKey;
       }
-      if(!(route.pathname==='/web/geek/chat'&&engine.monitoringChat?.(tab.id))&&(!unreadable||unreadable.key!==locationKey||now>=unreadable.until)){
+      if(route.pathname==='/web/geek/chat'){
+        const ready=await page('FOLLOW_NAV_READY',{},tab.id);
+        if(!ready.ready){step('chat',ready.reason);return;}
+      }
+      const managed=tab.id===flowTab&&(route.pathname==='/web/geek/chat'||!!config.lastSearch&&route.pathname==='/web/geek/jobs');
+      if(!managed&&!(route.pathname==='/web/geek/chat'&&engine.monitoringChat?.(tab.id))&&(!unreadable||unreadable.key!==locationKey||now>=unreadable.until)){
         try{
           if(await importVisible(tab,token)==='draft')return;
           unreadable=null;
@@ -260,8 +296,11 @@ window.startJobAutomation=function(engine){
         tab=await chrome.tabs.create({url:item.search_url});await waitForAccount(tab.id);
       }
       await assertAccount(tab,token);current(token);
-      await api('APP_DISPATCH',{},approved.id);current(token);
-      const ok=await engine.begin(op=>engine.executeBatch(op,approved.id));
+      const ok=await engine.begin(async op=>{
+        current(token);flowTab=tab.id;
+        await api('APP_DISPATCH',{},approved.id);current(token);
+        await engine.executeBatch(op,approved.id);
+      });
       if(enabled()){report($('#pipeline-status').textContent);step('batch',$('#pipeline-status').textContent);}
       if(ok===false&&enabled())await disable('批次执行暂停。'+$('#pipeline-status').textContent);
       return;
@@ -287,13 +326,31 @@ window.startJobAutomation=function(engine){
       }
       current(token);if(engine.occupied())return;
       await run(tab,settings,key,token);
-    }else if($('#step-batch').textContent==='等待前序步骤')step('batch','本轮搜索已完成，等待条件更新或新批次');
+    }else if(tab.id===flowTab&&official(tab.url)){
+      const follow=await api('FOLLOW_TARGETS');current(token);
+      if(!follow.enabled||follow.account_label!==config.account){
+        step('chat','请在工作台为当前账号开启 HR 回复跟进');return;
+      }
+      if(route.pathname==='/web/geek/jobs'||route.pathname.startsWith('/job_detail/')){
+        if((await activeTab())?.id!==tab.id)return;
+        await chrome.tabs.update(tab.id,{url:chatURL});
+      }
+      if(route.pathname==='/web/geek/chat'||route.pathname==='/web/geek/jobs'||route.pathname.startsWith('/job_detail/')){
+        step('chat','正在监听已沟通岗位和已保存会话中的 HR 来信');
+        step('batch','本轮筛选完成；下次条件更新或次日继续搜索');
+      }
+    }
   }
   async function tick(){
     if(polling||!enabled()||closing)return;
     polling=true;const token=epoch;
     try{await navigator.locks.request('job-agent-real-automation',{ifAvailable:true},async lock=>{if(lock)await inspect(token);});}
-    catch(error){if(token===epoch&&enabled())await disable('自动化暂停：'+error.message);}
+    catch(error){
+      if(token===epoch&&enabled()){
+        if(error.name==='ReadReceiverUnavailable')report(error.message+' 正在等待重连。');
+        else await disable('自动化暂停：'+error.message);
+      }
+    }
     finally{polling=false;}
   }
   const timer=setInterval(()=>void tick(),2000);
@@ -311,5 +368,5 @@ window.startJobAutomation=function(engine){
     if(config){step('pair','使用已保存的配对');step('profile','使用已保存的真实页面配置');mode.value=config.mode;resume.value=config.resume;report('自动化已开启，等待真实 BOSS 页面或本机工作台。');}
     controls();
   }).catch(error=>report(error.message));
-  return {enabled,disable};
+  return {enabled,disable,ownsInbox:id=>enabled()&&compatible&&flowTab===id};
 };

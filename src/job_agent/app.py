@@ -153,7 +153,7 @@ def create_app(directory=None, testing=False):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "app": "job-search-agent", "scope": "local-single-user"}
+        return {"status": "ok", "app": "job-search-agent", "scope": "local-single-user", "workflow_version": "0.10.1"}
 
     @app.get("/boss-fixture", response_class=HTMLResponse)
     def boss_fixture():
@@ -168,6 +168,12 @@ def create_app(directory=None, testing=False):
     @app.exception_handler(MatchError)
     async def match_error(request: Request, exc: MatchError):
         return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
+    @app.post("/api/model/check", dependencies=[Depends(admin)])
+    def check_model():
+        result = service.model.match_response('连接测试。仅返回 JSON 对象 {"ok":true}。', {})
+        require(result.get("ok") is True, "模型已响应，但生成测试未通过", 502)
+        return {"ok": True}
 
     @app.put("/api/model/key", dependencies=[Depends(admin)])
     def configure_model(data: ModelKeyInput):

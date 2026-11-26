@@ -51,7 +51,8 @@ function harness(options = {}) {
       if(type==='PIPE_CURRENT')return {tabId:7,account_label:'本人账号',job:job(selected)};
       if(type==='PIPE_OPEN')return {tabId:7,opened:true};
       if(type==='PIPE_TARGET')return {tabId:7,account_label:'本人账号',verified:true};
-      if(type==='PIPE_PREPARE_RESUME')return {tabId:7,message_ids:['old'],resume_label:'本人简历.pdf'};
+      if(type==='PIPE_OPEN_RESUME')return {recruiter_receipt:'old',contact:'公司 HR'};
+    if(type==='PIPE_PREPARE_RESUME')return {tabId:7,message_ids:['old'],resume_label:'本人简历.pdf'};
       if(type==='PIPE_VERIFY')return {tabId:7,outcome:'RESUME_SENT',receipt_key:selected,evidence:'本人简历.pdf 已发送'};
       return {tabId:7};
     }
@@ -78,6 +79,43 @@ test('a real empty result advances to the next combination',async()=>{
   await h.run('#search-jobs');
   assert.deepEqual(h.navigations,urls);
   assert.equal(h.collected.length,2);
+});
+
+const modelOffline='工作台未能与模型接口建立连接，请检查网络或代理';
+test('a model connection interruption retries only the selected job and keeps earlier matches',async()=>{
+  let failed=false;
+  const h=harness({api(type,data){
+    if(type==='COLLECT'&&data.jobs[0].external_id==='shared'&&!failed){failed=true;throw Error(modelOffline);}
+  }});
+  await h.run('#search-jobs');
+  assert.deepEqual(h.calls.filter(c=>c.type==='COLLECT').map(c=>c.data.jobs[0].external_id),['one','shared','shared','two']);
+  assert.deepEqual(h.calls.filter(c=>c.type==='PIPE_SELECT').map(c=>c.data.external_id),['one','shared','two']);
+  assert.match(h.status(),/搜索完成.*3 个岗位/);
+});
+
+test('persistent connection failures and credential errors stop before creating a batch',async()=>{
+  for(const [error,attempts] of [[modelOffline,4],['匹配 API 返回 HTTP 401，请检查 API Key',1]]){
+    const h=harness({api(type){if(type==='COLLECT')throw Error(error);}});
+    await h.run('#search-jobs');
+    assert.equal(h.calls.filter(c=>c.type==='COLLECT').length,attempts);
+    assert.ok(h.status().includes(error));
+    assert.ok(!h.calls.some(c=>c.type==='AUTO_DRAFTS'));
+  }
+});
+
+test('a changed resume or selected job prevents a model retry',async()=>{
+  for(const change of ['resume','job']){
+    let offline=false;
+    const h=harness({api(type){
+      if(type==='COLLECT'){offline=true;throw Error(modelOffline);}
+      if(offline&&change==='resume'&&type==='SEARCH')return {...h.settings,resume_revision:22};
+    },page(type){
+      if(offline&&change==='job'&&type==='PIPE_CURRENT')return {account_label:'本人账号',job:job('other')};
+    }});
+    await h.run('#search-jobs');
+    assert.equal(h.calls.filter(c=>c.type==='COLLECT').length,1);
+    assert.match(h.status(),/已更新|已变化/);
+  }
 });
 
 test('account change stops before importing jobs',async()=>{

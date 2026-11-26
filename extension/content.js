@@ -21,6 +21,29 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else if(message.type==='PIPE_CURRENT')reply({ok:true,data:pipeline.current()});
     else if(message.type==='PIPE_OPEN')reply({ok:true,data:pipeline.open(message.action)});
     else if(message.type==='FOLLOW_DIAGNOSE')reply({ok:true,data:pipeline.diagnoseResume(message.label)});
+    else if(message.type==='FOLLOW_NAV_READY'){
+      pipeline.guard();
+      const input=document.querySelector(pipeline.profile.inputSelector||'#chat-input');
+      const draft=input&&pipeline.visible(input)&&(input.isContentEditable?pipeline.text(input):input.value||'').trim();
+      const dialog=pipeline.profile.resumeDialogSelector||'dialog,[role="dialog"],.dialog-wrap,.dialog-container';
+      const pending=[...document.querySelectorAll(dialog)].some(el=>pipeline.visible(el))||pipeline.directPrompt();
+      reply({ok:true,data:{ready:!draft&&!pending,reason:draft?'输入框有草稿，等待你处理':pending?'请在当前会话处理确认窗口':''}});
+    }
+    else if(message.type==='FOLLOW_OPEN_CHAT'){
+      const p=pipeline.profile;
+      const header=document.querySelector(p.viewConversationSelector),position=document.querySelector(p.viewPositionSelector);
+      if(!header||!position||!pipeline.visible(header)||!pipeline.visible(position)){reply({ok:true,data:{}});return;}
+      const contact=pipeline.text(header),title=pipeline.text(position).split('\n')[0];
+      const company=contact.split('\n').filter(Boolean)[1]||'当前招聘方';
+      const target={...message.action,title,contact,company,manual_chat:true};
+      const known=message.items.filter(i=>i.title.replace(/\s/g,'')===title.replace(/\s/g,'')&&
+        (i.contact?i.contact===contact:contact.split('\n').some(l=>l.trim()===i.company)));
+      if(known.length>1)throw Error('当前岗位匹配了多个投递会话');
+      const snapshot=pipeline.followRead(target);
+      const input=document.querySelector(p.inputSelector);
+      const drafting=!!input&&(input.isContentEditable?pipeline.text(input):input.value||'').trim()!=='';
+      reply({ok:true,data:{title,company,snapshot,drafting,id:known[0]?.id}});
+    }
     else if(message.type==='FOLLOW_HINT'){
       const clean=s=>s.replace(/\s+/g,'').toLowerCase();
       let matches=[];
@@ -38,7 +61,11 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else if(message.type==='PIPE_SELECT_CHAT')reply({ok:true,data:pipeline.selectChat(message.action)});
     else if(message.type==='PIPE_TARGET')reply({ok:true,data:pipeline.chatTarget(message.action)});
     else if(message.type==='PIPE_PREPARE_GREETING')reply({ok:true,data:pipeline.prepareGreeting(message.action)});
-    else if(message.type==='PIPE_SEND_GREETING')reply({ok:true,data:pipeline.sendGreeting(message.action)});
+    else if(message.type==='PIPE_SEND_GREETING'){
+      pipeline.sendGreetingWhenReady(message.action).then(
+        data=>reply({ok:true,data}),error=>reply({ok:false,error:error.message}));
+      return true;
+    }
     else if(message.type==='PIPE_OPEN_RESUME')reply({ok:true,data:pipeline.openResume(message.action)});
     else if(message.type==='PIPE_PREPARE_RESUME')reply({ok:true,data:pipeline.prepareResume(message.action)});
     else if(message.type==='PIPE_SEND_RESUME')reply({ok:true,data:pipeline.sendResume(message.action)});

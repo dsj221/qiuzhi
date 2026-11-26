@@ -1,7 +1,9 @@
 'use strict';
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
-  if(message.type!=='CREATE_LOCAL_PAIR'||sender.id!==chrome.runtime.id||
+  if(sender.id!==chrome.runtime.id||
      sender.url!==chrome.runtime.getURL('panel.html')||location.href!=='http://127.0.0.1:8766/')return false;
+  if(message.type==='PAIR_READY'){reply({ready:!!document.querySelector('#boss-pair-form')});return false;}
+  if(message.type!=='CREATE_LOCAL_PAIR')return false;
   (async()=>{
     const form=document.querySelector('#boss-pair-form'),output=document.querySelector('#boss-pair-value');
     if(!form||!output||output.value)throw Error('工作台配对表单尚未就绪');

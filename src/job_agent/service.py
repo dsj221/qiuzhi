@@ -215,7 +215,7 @@ class Service:
                     if batch:
                         batch['state'] = 'NEEDS_REVIEW'
                         db.put('application_batch', batch)
-            for kind in ("boss_message", "boss_action", "boss_snapshot", "follow_watch", "follow_notice"):
+            for kind in ("boss_message", "boss_action", "boss_snapshot", "follow_watch", "follow_notice", "follow_history"):
                 for record in db.all(kind):
                     if record["job_id"] == key:
                         db.delete(kind, record["id"])

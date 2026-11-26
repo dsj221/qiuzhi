@@ -45,9 +45,21 @@
       prepared=adapter.prepareGreeting(action);adapter.sendGreeting(action);
       const greeting=adapter.verify(action,prepared.message_ids);assert(greeting.outcome==='COMMUNICATING','新招呼回执仅同步为沟通中');
       assert(adapter.verify(action,adapter.receipts().map(m=>m.id)).outcome==='UNKNOWN','历史消息不能冒充新回执');
-      const resume={...action,mode:'resume'};adapter.openResume(resume);
+      const resume={...action,mode:'resume'};
+      rejects(()=>adapter.openResume(resume),'仅有本人招呼不能打开附件入口');
+      add('recruiter','已读');
+      rejects(()=>adapter.openResume(resume),'已读状态不能当作 HR 来信');
+      add('recruiter','系统提示');q('#fixture-messages').lastElementChild.classList.add('item-system');
+      rejects(()=>adapter.openResume(resume),'系统消息不能当作 HR 来信');
+      add('recruiter','你好，可以发份简历吗？');
+      const source=adapter.openResume(resume);
+      resume.recruiter_receipt=source.recruiter_receipt;resume.contact=source.contact;
       rejects(()=>adapter.prepareResume({...resume,resume_label:'其他文件.pdf'}),'准确名称不匹配时禁止改发其他简历');
-      prepared=adapter.prepareResume(resume);adapter.sendResume(resume);
+      prepared=adapter.prepareResume(resume);
+      const row=q('#fixture-messages').lastElementChild;
+      row.classList.replace('from-recruiter','from-me');
+      rejects(()=>adapter.sendResume(resume),'确认前原 HR 消息无法核对时停止');
+      row.classList.replace('from-me','from-recruiter');adapter.sendResume(resume);
       assert(adapter.verify(resume,prepared.message_ids).outcome==='RESUME_SENT','指定简历和新发送回执同时核验');
       const baseline=adapter.receipts().map(m=>m.id);add('me','已请求发送简历，请等待对方同意');
       assert(adapter.verify(resume,baseline).outcome==='RESUME_REQUESTED','简历请求与简历已发送分别记录');
@@ -63,10 +75,11 @@
       const opener=q('#fixture-open-resume'),original=opener.onclick;
       let clicks=0;
       opener.onclick=()=>q('#fixture-resume-controls').append(prompt);
-      prompt.lastElementChild.onclick=()=>{clicks++;prompt.remove();add('me','已发送附件简历');};
+      prompt.lastElementChild.onclick=()=>{clicks++;prompt.remove();add('me','您的附件简历 示例.pdf 已发送给Boss点击查看附件');};
       try{
         adapter.openResume(direct);prepared=adapter.prepareResume(direct);
         assert(!clicks&&adapter.verify(direct,prepared.message_ids).outcome==='UNKNOWN','识别确认弹窗本身不算附件已发');
+        rejects(()=>adapter.sendResume({...direct,confirmation:'personal'}),'本人确认时扩展不能代点');
         adapter.sendResume(direct);
         assert(clicks===1&&adapter.verify(direct,prepared.message_ids).outcome==='RESUME_SENT','发简历 → 确定后核对聊天中的新发送回执');
         rejects(()=>adapter.sendResume(direct),'相同确认动作不能重复发送');

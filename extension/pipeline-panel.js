@@ -6,7 +6,7 @@
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   function check(epoch){if(epoch!==generation)throw Error('任务已停止');if(JSON.stringify(profile)!==operationProfile)throw Error('页面适配配置已变化，任务已停止');}
   async function pipe(type,extra={},epoch=generation){check(epoch);return page(type,extra,operationTab);}
-  async function until(read,epoch,tries=20){let last;for(let i=0;i<tries;i++){check(epoch);try{return await read();}catch(error){last=error;if(/登录|验证|账号|后台|当前标签页已变化/.test(error.message))throw error;}await sleep(300);}throw last||Error('页面未就绪');}
+  async function until(read,epoch,tries=20){let last;for(let i=0;i<tries;i++){check(epoch);try{return await read();}catch(error){last=error;if(error.name==='ReadReceiverUnavailable'||error.name==='ActionReceiverUnavailable'||/登录|验证|账号|后台|当前标签页已变化/.test(error.message))throw error;}await sleep(300);}throw last||Error('页面未就绪');}
   async function select(key,epoch){await pipe('PIPE_SELECT',{external_id:key},epoch);return until(async()=>{const current=await pipe('PIPE_CURRENT',{},epoch);if(current.job.external_id!==key)throw Error('岗位详情正在切换');return current;},epoch);}
   function listUrl(value){const url=new URL(value);if(url.username||url.password||url.hash||!(url.origin==='https://www.zhipin.com'&&url.pathname==='/web/geek/jobs'||url.origin==='http://127.0.0.1:8766'&&url.pathname==='/boss-fixture'))throw Error('搜索来源不是受支持的官方岗位列表');return url.href;}
   function sameSearch(actual,expected){
@@ -42,27 +42,48 @@
     await until(()=>pipe('PIPE_SELECT_CHAT',{action},epoch),epoch,60);
     return until(()=>pipe('PIPE_TARGET',{action},epoch),epoch,60);
   }
-  async function collectListing(listing,settings,epoch,seen,counts){
+  async function screenJob(current,listing,settings,epoch,status){
+    const delays=[3,10,30];
+    for(let attempt=0;;attempt++){
+      check(epoch);
+      try{
+        return await api('COLLECT',{jobs:[current.job],search_url:listing.list_url,preferences_revision:settings.preferences.revision});
+      }catch(error){
+        if(attempt>=delays.length||!['工作台未能与模型接口建立连接，请检查网络或代理','连接模型时 TLS 握手中断，请检查当前网络或工作台使用的代理'].includes(error.message))throw error;
+        status(`模型连接中断，${delays[attempt]} 秒后重新筛选「${current.job.title}」（${attempt+1}/${delays.length}）`);
+        await sleep(delays[attempt]*1000);
+        check(epoch);
+        const latest=await api('SEARCH');
+        if(latest.preferences.revision!==settings.preferences.revision||latest.resume_revision!==settings.resume_revision)throw Error('简历或筛选条件已更新，请重新启动搜索');
+        const selected=await pipe('PIPE_CURRENT',{},epoch);
+        if(selected.account_label!==current.account_label||selected.job.external_id!==current.job.external_id)throw Error('账号或当前岗位已变化，请重新筛选');
+        current=selected;
+      }
+    }
+  }
+  async function collectListing(listing,settings,epoch,seen,counts,status=say){
     for(const candidate of listing.jobs.slice(0,settings.preferences.limit)){
       check(epoch);if(seen.has(candidate.external_id))continue;
-      say(`正在读取第 ${counts.read+1} 个岗位：${candidate.title}`);
+      status(`正在读取第 ${counts.read+1} 个岗位：${candidate.title}`);
       const current=await select(candidate.external_id,epoch);if(current.account_label!==listing.account_label)throw Error('显示账号已变化');check(epoch);
-      const result=await api('COLLECT',{jobs:[current.job],search_url:listing.list_url,preferences_revision:settings.preferences.revision});
-      seen.add(candidate.external_id);counts.read++;const status=result.opportunities[0].screening.result;counts.matched+=status==='matched'?1:0;counts.review+=status==='review'?1:0;
-      if(status==='matched')counts.ids?.push(result.opportunities[0].id);
+      const result=await screenJob(current,listing,settings,epoch,status);
+      seen.add(candidate.external_id);counts.read++;
+      const screening=result.opportunities[0].screening.result;
+      counts.matched+=screening==='matched'?1:0;counts.review+=screening==='review'?1:0;
+      if(screening==='matched')counts.ids?.push(result.opportunities[0].id);
     }
   }
   async function refreshBatches(){const data=await api('APPLICATIONS');q('#application-batch').replaceChildren(new Option('选择已确认批次',''),...data.batches.map(b=>new Option(`${b.id.slice(0,8)} · ${b.mode==='resume'?'发送指定简历':'打招呼'} · ${data.items.filter(i=>i.batch_id===b.id).length} 个待处理`,b.id)));return data;}
-  async function begin(work){if(busy||followups?.busy()){say('另一项页面操作正在进行，请稍后重试');return;}busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
-  async function search(epoch,settings,expectedTab=null,expectedAccount=null){
+  async function begin(work,{resumeSearch=false}={}){if(busy||followups?.busy()){say('另一项页面操作正在进行，请稍后重试');return;}busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){if(resumeSearch&&error.name==='ReadReceiverUnavailable')throw error;say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
+  async function search(epoch,settings,expectedTab=null,expectedAccount=null,status=say){
     const plan=settings.search_plan;if(!plan?.entries.length)throw Error(plan?.warnings?.join('。')||'请先在工作台保存筛选条件');
     const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if((expectedTab!==null&&expectedTab!==operationTab)||(expectedAccount&&expectedAccount!==context.account_label))throw Error('自动搜索的账号或标签页已变化');if(profile.jobSelector==='#fixture-job')throw Error('模拟配置仅支持采集模拟列表；搜索真实岗位前请使用已验证的岗位列表配置');
     const counts={read:0,matched:0,review:0,ids:[]},seen=new Set();
     for(let i=0;i<plan.entries.length;i++){
-      const entry=plan.entries[i];check(epoch);say(`正在搜索 ${i+1}/${plan.entries.length}：${entry.title} · ${[entry.city,entry.district].filter(Boolean).join('·')}`);
+      const entry=plan.entries[i];check(epoch);status(`正在搜索 ${i+1}/${plan.entries.length}：${entry.title} · ${[entry.city,entry.district].filter(Boolean).join('·')}`);
       if(i>0&&(await api('SEARCH')).preferences.revision!==settings.preferences.revision)throw Error('筛选条件已更新，请重新启动搜索');check(epoch);
       const listing=await navigate(entry.url,epoch,entry);if(listing.account_label!==context.account_label)throw Error('显示账号已变化');
-      await collectListing(listing,settings,epoch,seen,counts);
+      await collectListing(listing,settings,epoch,seen,counts,status);
     }
     await jobs();return {counts,plan,context};
   }
@@ -118,8 +139,15 @@
         }
         let prepared;
         if(action.mode==='greeting')prepared=await pipe('PIPE_PREPARE_GREETING',{action},epoch);
-        else{check(epoch);await pipe('PIPE_OPEN_RESUME',{action},epoch);prepared=await until(()=>pipe('PIPE_PREPARE_RESUME',{action},epoch),epoch);}
-        await api('APP_PREFLIGHT',{lease:action.lease,stage:action.mode==='greeting'?'send_greeting':'send_resume',account_label:target.account_label,target_verified:true,message_ids:prepared.message_ids,resume_label:prepared.resume_label||''},action.id);
+        else{
+          check(epoch);
+          const source=await pipe('PIPE_OPEN_RESUME',{action},epoch);
+          if(!source.recruiter_receipt||!source.contact)throw Error('未核对当前 HR 来信，请刷新聊天页');
+          action.recruiter_receipt=source.recruiter_receipt;
+          action.contact=source.contact;
+          prepared=await until(()=>pipe('PIPE_PREPARE_RESUME',{action},epoch),epoch);
+        }
+        await api('APP_PREFLIGHT',{lease:action.lease,stage:action.mode==='greeting'?'send_greeting':'send_resume',account_label:target.account_label,target_verified:true,message_ids:prepared.message_ids,resume_label:prepared.resume_label||'',recruiter_receipt:action.recruiter_receipt||''},action.id);
         check(epoch);await pipe(action.mode==='greeting'?'PIPE_SEND_GREETING':'PIPE_SEND_RESUME',{action},epoch);
         let receipt={outcome:'UNKNOWN'};
         for(let t=0;t<20;t++){check(epoch);await sleep(500);receipt=await pipe('PIPE_VERIFY',{action,baseline:prepared.message_ids},epoch);if(receipt.outcome!=='UNKNOWN')break;}
@@ -161,7 +189,7 @@
     }
   }
   async function halt(){generation++;clearInterval(receiptTimer);receiptTimer=null;if(operationTab)void chrome.tabs.sendMessage(operationTab,{type:'PIPE_CANCEL',profile}).catch(()=>{});if(currentBatch){try{await api('APP_STOP',{},currentBatch);}catch{}}say('已停止。可能已点击的动作需核对平台，不自动重试。');}
-  const followups=window.startReplyMonitor?.(()=>busy||importBusy||jdBusy||!!bound||running);
+  const followups=window.startReplyMonitor?.(()=>busy||importBusy||jdBusy||!!bound||running,id=>automation?.ownsInbox(id));
   const automation=window.startJobAutomation?.({
     monitoringChat:tabId=>followups?.monitors(tabId),
     search,executeBatch,begin,halt,check,syncReceipts,

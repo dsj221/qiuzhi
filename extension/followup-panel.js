@@ -1,6 +1,6 @@
 'use strict';
 
-window.startReplyMonitor=function(occupied){
+window.startReplyMonitor=function(occupied,ownsInbox=()=>false){
   const output=$('#followup-status');
   let busy=false, closing=false, monitoringTab=null;
   const realProfile=fetch(chrome.runtime.getURL('boss-chat-profile.json')).then(r=>r.json());
@@ -31,7 +31,7 @@ window.startReplyMonitor=function(occupied){
         if(!fixture&&!/^https:\/\/www\.zhipin\.com\/web\/geek\/chat(?:[/?#]|$)/.test(tab?.url||'')){
           monitoringTab=null;output.textContent='请将已登录的 BOSS 聊天页设为当前标签页。';return;
         }
-        await inspect(tab,fixture,reason);
+        await inspect(tab,fixture,reason,ownsInbox(tab.id));
       });
     }catch(e){output.textContent='跟进待核对 · '+e.message;}
     finally{busy=false;}
@@ -39,6 +39,7 @@ window.startReplyMonitor=function(occupied){
   chrome.runtime.onMessage.addListener((msg,sender)=>{
     if(msg.type==='FOLLOW_WAKE'&&msg.reason&&sender.id===chrome.runtime.id&&sender.tab?.id)void tick(msg.reason,sender.tab.id);
   });
+  $('#followup-catchup').onclick=()=>tick('catch_up');
   const timer=setInterval(tick,5000);
   window.addEventListener('pagehide',()=>{closing=true;clearInterval(timer);});
   return {busy:()=>busy, monitors:tabId=>monitoringTab===tabId};

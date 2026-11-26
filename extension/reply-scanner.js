@@ -3,13 +3,17 @@
 function createReplyScanner({api,page,getProfile,check,report,monitor}){
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const realProfile=fetch(chrome.runtime.getURL('boss-chat-profile.json')).then(r=>r.json());
-  let cursor=0;
-  return async function inspect(tab,fixture,reason){
+  let cursor=0,nextRotation=0,lastOpened='';
+  return async function inspect(tab,fixture,reason,workflow=false){
     const plan=await api('FOLLOW_TARGETS');
     monitor(null);
     if(!plan.enabled){report('在工作台「HR 回复跟进」开启后开始监听。');return;}
     const items=plan.items.filter(i=>(i.source==='fixture')===fixture);
-    if(!items.length){report('等待已确认打过招呼的岗位。');return;}
+    if(workflow&&!fixture){
+      const isBatch=t=>items.some(i=>i.source!=='manual_chat'&&i.title===t.title&&i.company===t.company);
+      items.push(...(plan.threads||[]).filter(t=>!isBatch(t)));
+    }
+    if(!items.length&&!plan.current_chat){report('等待已确认打过招呼的岗位。');return;}
     const profile=await getProfile();
     if(fixture&&profile.jobSelector!=='#fixture-job')throw Error('本机模拟页需要模拟配置');
     const p=fixture?profile:{...await realProfile,...(profile.jobSelector==='#fixture-job'?{}:profile)};
@@ -17,28 +21,68 @@ function createReplyScanner({api,page,getProfile,check,report,monitor}){
     const account=await call('PIPE_ACCOUNT');
     if(account.account_label!==plan.account_label)throw Error('当前账号与跟进设置不符');
     monitor(tab.id);
-    let item;
-    if(reason){
+    let item,snapshot,manual=false;
+    const catchUp=reason==='catch_up';
+    if(catchUp&&!plan.current_chat)throw Error('当前工作台尚未加载手动会话跟进，请重启本机服务');
+    const opened=!fixture&&plan.current_chat;
+    let drafting=false;
+    if(opened){
+      if(!plan.opened_history)throw Error('请重启工作台以启用当前会话历史保存');
+      const context={items:items.map(({id,title,company,contact})=>({id,title,company,contact})),
+        action:{account_label:plan.account_label,expires_at:Date.now()/1000+90}};
+      let first=await call('FOLLOW_OPEN_CHAT',context);
+      const identity=view=>JSON.stringify([tab.id,view.title,view.snapshot?.contact,view.snapshot?.messages.at(-1)?.id]);
+      const settled=!first.snapshot||identity(first)===lastOpened;
+      if(workflow&&items.length&&!catchUp&&!first.drafting&&settled&&Date.now()>=nextRotation){
+        nextRotation=Date.now()+10000;
+        const hinted=reason==='inbox'?await call('FOLLOW_HINT',{reason,items:context.items}):null;
+        const next=items.find(i=>hinted?.id===i.id)||items[cursor++%items.length];
+        if(first.id!==next.id){
+          await call('PIPE_SELECT_CHAT',{action:{...next,...context.action,follow_target:true}});
+          for(let attempt=0;attempt<8;attempt++){
+            await delay(250);
+            first=await call('FOLLOW_OPEN_CHAT',context);
+            if(first.id===next.id)break;
+          }
+          if(first.id!==next.id){report('等待核对所选岗位的聊天记录');return;}
+        }
+      }
+      if(!first.snapshot){report('等待读取当前会话。');return;}
+      await delay(300);
+      const current=await call('FOLLOW_OPEN_CHAT',context);
+      if(!current.snapshot||first.snapshot.contact!==current.snapshot.contact||first.title!==current.title||
+          first.snapshot.messages.at(-1).id!==current.snapshot.messages.at(-1).id){
+        report('会话正在更新，稍后重新读取。');return;
+      }
+      item=current.id?items.find(i=>i.id===current.id):{title:current.title,company:current.company};
+      if(!item)return;
+      snapshot=current.snapshot;manual=!current.id||item.source==='manual_chat';drafting=current.drafting;
+      lastOpened=identity(current);
+      report(item.company+' · '+item.title+' · 正在检查当前会话');
+    }
+    if(!manual&&catchUp){report('请选择已有本人消息的手动沟通会话。');return;}
+    if(!manual&&!items.length)return;
+    if(!manual&&!item&&reason){
       const hint=await call('FOLLOW_HINT',{reason,items:items.map(({id,company,title})=>({id,company,title}))});
       item=items.find(i=>i.id===hint.id);
       if(!item)return;
-    }else item=items[cursor++%items.length];
+    }else if(!manual&&!item)item=items[cursor++%items.length];
     const target={...item,account_label:plan.account_label,expires_at:Date.now()/1000+90};
     // Selecting an existing conversation never uses the initial contact button.
-    await call('PIPE_SELECT_CHAT',{action:{...target,follow_target:true}});
-    let snapshot;
-    for(let i=0;i<8;i++){
+    if(!snapshot)await call('PIPE_SELECT_CHAT',{action:{...target,follow_target:true}});
+    for(let i=0;!snapshot&&i<8;i++){
       try{snapshot=await call('FOLLOW_READ',{action:target});break;}
       catch(e){if(i===7||!/岗位或公司|尚无可核对/.test(e.message))throw e;await delay(300);}
     }
-    const result=await api('FOLLOW_SCAN',{item_id:item.id,revision:plan.revision,account_label:plan.account_label,
+    const result=await api(manual?'FOLLOW_CURRENT':'FOLLOW_SCAN',{...(manual?{title:item.title,company:item.company,catch_up:catchUp}:{item_id:item.id}),opened_chat:!!opened,drafting,revision:plan.revision,account_label:plan.account_label,
       contact:snapshot.contact,messages:snapshot.messages,resume_seen:snapshot.resume_seen,
       delivered_id:snapshot.delivered_id,delivered_evidence:snapshot.delivered_evidence});
     report(item.company+' · '+item.title+' · '+result.status);
     if(!result.action)return;
     const action=result.action;
+    if(action.direct_resume===undefined)action.direct_resume=!action.resume_label;
     let stage='reply';
-    const progress=(outcome,extra={})=>api('FOLLOW_PROGRESS',{item_id:item.id,lease:action.lease,stage,outcome,...extra});
+    const progress=(outcome,extra={})=>api('FOLLOW_PROGRESS',{item_id:action.id,lease:action.lease,stage,outcome,...extra});
     async function receipt(action,baseline){
       for(let attempt=0;attempt<16;attempt++){
         await delay(300);
@@ -55,7 +99,7 @@ function createReplyScanner({api,page,getProfile,check,report,monitor}){
       const reply=await receipt(action,prepared.message_ids);
       await progress('sent',{evidence:reply.evidence,receipt_key:reply.receipt_key});
       report(item.company+' · 已确认文字回复');
-      if(!action.send_resume)return;
+      if(catchUp||!action.send_resume)return;
       stage='resume';action.mode='resume';action.reply_id=reply.receipt_key;
       const personal=action.confirmation!=='automatic';
       if(personal){

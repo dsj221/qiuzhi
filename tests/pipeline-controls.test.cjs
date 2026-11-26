@@ -5,7 +5,7 @@ const fs=require('node:fs');
 
 function control(covered=false,disabled=false){
   let clicks=0;
-  const button={disabled,scrollIntoView(){},getAttribute(){return null;},getBoundingClientRect(){return {left:10,top:10,width:100,height:30};},contains(node){return node===this;},click(){clicks++;}};
+  const button={disabled,closest(){return this;},scrollIntoView(){},getAttribute(){return null;},getBoundingClientRect(){return {left:10,top:10,width:100,height:30};},contains(node){return node===this;},click(){clicks++;}};
   const doc={elementFromPoint:()=>covered?{}:button};
   const context=vm.createContext({JobPageAdapter:class{guard(){}visible(){return true;}}});
   vm.runInContext(fs.readFileSync('src/job_agent/static/pipeline-adapter.js','utf8'),context);
@@ -20,4 +20,12 @@ test('disabled controls are not activated',()=>{
 });
 test('only the exposed enabled control is activated',()=>{
   const h=control();h.adapter.activate(h.button);assert.equal(h.clicks(),1);
+});
+
+test('a nested label uses the enabled button when its center is obscured',()=>{
+  const h=control();
+  h.adapter.doc.elementFromPoint=x=>x<50?h.button:{};
+  const label={disabled:false,getAttribute(){return null;},closest(){return h.button;}};
+  h.adapter.activate(label);
+  assert.equal(h.clicks(),1);
 });

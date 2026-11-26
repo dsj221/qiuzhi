@@ -32,8 +32,9 @@ function harness(options={}){
     if(type==='PIPE_OPEN'){if(options.openLost)throw Error('页面操作后连接断开');return {opened:true};}
     if(type==='PIPE_TARGET')return {verified:true,account_label:batch.account_label,message_ids:['old']};
     if(type==='PIPE_PREPARE_GREETING')return {prepared:true,message_ids:['old']};
+    if(type==='PIPE_OPEN_RESUME')return {recruiter_receipt:'old',contact:'公司 HR'};
     if(type==='PIPE_PREPARE_RESUME')return {prepared:true,message_ids:['old'],resume_label:'本人简历.pdf'};
-    if(type==='PIPE_SEND_GREETING'||type==='PIPE_OPEN_RESUME'||type==='PIPE_SEND_RESUME')return {clicked:true};
+    if(type==='PIPE_SEND_GREETING'||type==='PIPE_SEND_RESUME')return {clicked:true};
     if(type==='PIPE_VERIFY')return {outcome:batch.mode==='greeting'?'COMMUNICATING':'RESUME_SENT',receipt_key:'new-'+selected.id,evidence:batch.mode==='greeting'?'本人已核对的招呼':'本人简历.pdf 已发送给BOSS'};
     if(type==='PIPE_SYNC_VERIFY')return {outcome:'RESUME_SENT',receipt_key:'later-receipt',evidence:'本人简历.pdf 已发送给BOSS'};
     throw Error('Unexpected page '+type);

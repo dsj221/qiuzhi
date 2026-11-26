@@ -13,9 +13,9 @@ function open(store,settings,failSave=false){
       append(child){this.children.push(child);}};
   }
   function q(key){if(!nodes.has(key))nodes.set(key,node(key));return nodes.get(key);}
-  for(const k of ['account_label','message','later_message','confirmation','resume_label','connection','enabled','webhook','secret'])fields[k]=node(k);
+  for(const k of ['account_label','message','later_message','reply_mode','confirmation','resume_label','connection','enabled','webhook','secret'])fields[k]=node(k);
   const form=q('#followup-form');
-  form.elements=fields;form.querySelector=q;
+  form.elements=fields;form.querySelector=q;form.querySelectorAll=()=>[];
   q('#followup-settings').open=true;
   let sent=0;
   const api=async(path,method='GET',body)=>{

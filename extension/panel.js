@@ -1,13 +1,16 @@
 'use strict';
 const $=s=>document.querySelector(s);
 let bound=null,timer=null,running=false,profile={},generation=0;
-async function api(type,data={},actionId){const result=await chrome.runtime.sendMessage({type,data,actionId});if(!result?.ok)throw Error(result?.error||'本地服务未响应');return result.data;}
+async function api(type,data={},actionId){const result=await backgroundMessage(type,data,actionId);if(!result?.ok)throw Error(result?.error||'本地服务未响应');return result.data;}
 async function page(type,extra={},expectedTabId=null){
   const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
   if(expectedTabId!==null&&tab?.id!==expectedTabId)throw Error('当前标签页已变化，任务已停止');
   if(!tab?.id||!/^https:\/\/www\.zhipin\.com\//.test(tab.url||'')&&!/^http:\/\/127\.0\.0\.1:8766\/boss-fixture(?:[?#]|$)/.test(tab.url||''))throw Error('请切换到 BOSS 页面或本机模拟页面');
   if(bound&&bound.tabId!==tab.id)throw Error('当前标签页已变化，请重新绑定');
-  const result=await chrome.tabs.sendMessage(tab.id,{type,profile,...extra});
+  const result=await tabMessage(tab,{type,profile,...extra},async()=>{
+    const [active]=await chrome.tabs.query({active:true,currentWindow:true});
+    if(active?.id!==tab.id)throw Error('当前标签页已变化，任务已停止');
+  });
   if(!result?.ok)throw Error(result?.error||'页面脚本未就绪，请刷新 BOSS 页面');
   return {...result.data,tabId:tab.id};
 }
@@ -93,4 +96,4 @@ $('#stop').onclick=()=>{stop();void page('UNBIND_CHAT').catch(()=>{});bound=null
 $('#job').onchange=()=>{stop();bound=null;status('岗位已切换，请重新绑定会话');};
 window.addEventListener('pagehide',stop);
 chrome.tabs.onActivated.addListener(({tabId})=>{if(bound&&tabId!==bound.tabId){stop();status('已离开绑定页面，暂停同步。返回原页后核对当前会话，再手动恢复同步或填入；页面刷新后需重新绑定。');}});
-(async()=>{const saved=await chrome.storage.local.get('profile');profile=saved.profile||{};$('#profile').value=JSON.stringify(profile,null,2);const result=await chrome.runtime.sendMessage({type:'STATUS'});if(result?.data?.paired){await jobs();status('已配对，请诊断并绑定页面');}})().catch(failure);
+(async()=>{const saved=await chrome.storage.local.get('profile');profile=saved.profile||{};$('#profile').value=JSON.stringify(profile,null,2);const result=await backgroundMessage('STATUS');if(result?.data?.paired){await jobs();status('已配对，请诊断并绑定页面');}})().catch(failure);

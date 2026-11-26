@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import hmac
+import os
 import re
 import secrets
 import socket
@@ -16,6 +17,7 @@ from fastapi import Depends, Request
 from pydantic import BaseModel, Field
 
 from .applications import delivered
+from .model import MatchError
 from .privacy import redact
 from .service import require
 
@@ -26,9 +28,10 @@ CONTACTED = {"COMMUNICATING", "ALREADY_CONTACTED", "RESUME_SENT", "RESUME_REQUES
 
 
 class Rule(BaseModel):
+    reply_mode: Literal["ai", "template"] = "ai"
     enabled: bool
     account_label: str = Field(max_length=160)
-    message: str = Field(max_length=2000)
+    message: str = Field(default="", max_length=2000)
     resume_label: str = Field(max_length=160)
     webhook: str = Field(default="", max_length=300)
     secret: str = Field(default="", max_length=200)
@@ -39,10 +42,12 @@ class Rule(BaseModel):
 class Receipt(BaseModel):
     id: str = Field(min_length=1, max_length=200)
     role: Literal["me", "recruiter"]
-    text: str = Field(default="", max_length=300)
+    text: str = Field(default="", max_length=12000)
 
 
 class Scan(BaseModel):
+    opened_chat: bool = False
+    drafting: bool = False
     item_id: str
     revision: str
     account_label: str
@@ -51,6 +56,13 @@ class Scan(BaseModel):
     resume_seen: bool = False
     delivered_id: str = Field(default="", max_length=200)
     delivered_evidence: str = Field(default="", max_length=6000)
+
+
+class CurrentChat(Scan):
+    catch_up: bool = False
+    item_id: str = ""
+    title: str = Field(min_length=1, max_length=160)
+    company: str = Field(min_length=1, max_length=160)
 
 
 class Progress(BaseModel):
@@ -68,17 +80,24 @@ class Progress(BaseModel):
 def settings(db, key):
     rule = db.get("follow_rule", key) or dict(id=key, enabled=False, account_label="", message=DEFAULT_REPLY,
                                                resume_label="", webhook="", secret="", revision="")
+    rule.setdefault("reply_mode", "template" if rule["enabled"] else "ai")
     rule.setdefault("confirmation", "automatic" if rule["enabled"] and rule["resume_label"] else "personal")
     return rule
 
 
 def public(rule):
-    return {**{k: rule[k] for k in ("enabled", "account_label", "message", "resume_label", "confirmation")},
+    return {**{k: rule[k] for k in ("enabled", "account_label", "message", "resume_label", "confirmation", "reply_mode")},
             "later_message": rule.get("later_message", "" if rule["enabled"] else "收到，谢谢您！我会仔细看一下您的消息。"),
             "webhook_configured": bool(rule["webhook"]), "signed": bool(rule["secret"])}
 
 
+def follow_item(db, item_id):
+    return db.get("application_item", item_id) or db.get("follow_thread", item_id)
+
+
 def eligible(db, key, rule, item):
+    if item and item.get("source") == "manual_chat":
+        return rule["enabled"] and item["connection_id"] == key and item["account_label"] == rule["account_label"]
     if not item or item["connection_id"] != key or item["state"] not in CONTACTED:
         return False
     batch = db.get("application_batch", item["batch_id"])
@@ -88,6 +107,8 @@ def eligible(db, key, rule, item):
 
 
 def mark_applied(db, job_id):
+    if not job_id:
+        return
     job = db.get("job", job_id)
     if job and job["status"] == "communicating":
         job["status"] = "applied"
@@ -103,14 +124,70 @@ def follow_delivery(evidence, label):
     return bool(re.fullmatch(r"(?:您|你|我)?(?:已成功发送|已发送)(?:了)?(?:一份)?(?:附件)?简历(?:给(?:对方|招聘方|HR|Boss))?[。！!]?", evidence.strip(), re.I))
 
 
-def collect(db, key, rule, data):
-    item = db.get("application_item", data.item_id)
+def archive_window(db, key, item, data):
+    """Merge overlapping page windows by platform ID, retaining both speakers and order."""
+    archive = db.get("follow_history", item["id"]) or dict(
+        id=item["id"], connection_id=key, job_id=item["job_id"], contact=data.contact,
+        account_label=data.account_label, title=item["title"], company=item["company"], messages=[])
+    require(archive["contact"] == data.contact and archive["account_label"] == data.account_label,
+            "当前会话与已保存记录不一致")
+    original = archive["messages"]
+    by_id = {m["id"]: m for m in original}
+    old_ids = list(by_id)
+    visible = [m.id for m in data.messages]
+    overlap = [i for i in visible if i in by_id]
+    if original:
+        require(overlap, "请加载与已保存历史相邻的聊天记录")
+        indices = {mid: i for i, mid in enumerate(old_ids)}
+        require(all(indices[a] < indices[b] for a, b in zip(overlap, overlap[1:])), "消息顺序有变化")
+    # Insert new groups immediately before their next shared message.
+    additions, before = [], {}
+    changed = False
+    for m in data.messages:
+        row = dict(id=m.id, role=m.role, text=redact(m.text))
+        if m.id in by_id:
+            prior = by_id[m.id]
+            require(prior["role"] == m.role, "消息方向有变化")
+            if row["text"] and prior["text"] != row["text"]:
+                by_id[m.id] = row
+                changed = True
+            if additions:
+                before[m.id] = additions
+                additions = []
+        else:
+            additions.append(row)
+            changed = True
+    if changed:
+        merged = []
+        for mid in old_ids:
+            merged.extend(before.get(mid, []))
+            merged.append(by_id[mid])
+            if overlap and mid == overlap[-1]:
+                merged.extend(additions)
+        if not original:
+            merged = additions
+        archive.update(messages=merged, updated=time.time())
+        db.put("follow_history", archive)
+    return archive
+
+
+def collect(db, key, rule, data, *, archive_only=False):
+    item = follow_item(db, data.item_id)
     require(eligible(db, key, rule, item) and data.revision == rule["revision"]
             and data.account_label == rule["account_label"], "跟进设置或岗位已变化")
     ids = [m.id for m in data.messages]
     require(len(ids) == len(set(ids)), "消息编号重复，请检查页面", 422)
     watch = db.get("follow_watch", item["id"]) or {
         "id": item["id"], "job_id": item["job_id"], "connection_id": key, "reply": "", "resume": ""}
+    if watch.get("contact"):
+        require(watch["contact"] == data.contact, "招聘方身份有变化，请核对会话")
+    archive = archive_window(db, key, item, data) if data.opened_chat else None
+    if archive_only:
+        return {"status": "聊天记录已保存在本机，AI 自动回复等待授权"}
+    if archive and ids[-1] != archive["messages"][-1]["id"]:
+        return {"status": "已保存较早的历史消息"}
+    if data.opened_chat and data.drafting:
+        return {"status": "已保存聊天记录，输入框有草稿"}
     if (watch["resume"] in {"requested", "review", "sending", "awaiting_confirmation"} and watch.get("file_baseline") is not None
             and watch.get("contact") == data.contact
             and data.delivered_id and data.delivered_id not in watch["file_baseline"]
@@ -120,22 +197,43 @@ def collect(db, key, rule, data):
         db.put("follow_watch", watch)
     # A new rule establishes a new baseline, while prior send reservations survive edits and restarts.
     same_session = watch.get("revision") == rule["revision"]
+    # A known greeting followed by a new HR message can arrive before the first scan.
+    # Opening an unrelated historical chat must still be a text-only catch-up.
+    greeting_id = item.get("receipt_key") if item.get("finished_at", 0) >= rule["since"] else None
+    confirmed_greeting = (item["state"] == "COMMUNICATING" and
+                          any(m.id == greeting_id and m.role == "me" for m in data.messages[:-1]))
+    opening = data.opened_chat and not same_session and not confirmed_greeting
+    if item.get("source") == "manual_chat":
+        require(item["contact"] == data.contact and item["anchor"] in ids, "当前会话身份无法核对")
     if same_session:
         require(watch["contact"] == data.contact, "招聘方身份有变化，请核对会话")
         anchor = watch["cursor"]
     else:
         anchor = item.get("receipt_key") if item.get("finished_at", 0) >= rule["since"] else None
-        if anchor and anchor not in ids:
+        if not data.opened_chat and anchor and anchor not in ids:
             return {"status": "请在 BOSS 加载原招呼回执，以核对后续新消息"}
         watch.update(revision=rule["revision"], contact=data.contact)
-    if same_session and anchor not in ids:
+    if getattr(data, "catch_up", False) and data.messages[-1].role == "recruiter" and item.get("source") == "manual_chat":
+        # Explicit recovery only considers the unanswered turn after the last candidate message.
+        anchor = next((m.id for m in reversed(data.messages) if m.role == "me"), None)
+    recover_open = data.opened_chat and ids[-1] != watch.get("opened_trigger") and data.messages[-1].role == "recruiter"
+    if recover_open:
+        watch["opened_trigger"] = ids[-1]
+    if same_session and anchor not in ids and not recover_open:
         return {"status": "未找到上次消息，请在 BOSS 加载相邻聊天记录后继续"}
     fresh = data.messages[ids.index(anchor)+1:] if anchor in ids else []
+    if recover_open:
+        last_me = max((i for i, m in enumerate(data.messages) if m.role == "me"), default=-1)
+        fresh = data.messages[last_me+1:]
     watch["cursor"] = ids[-1]
     if data.resume_seen or item["state"] in {"RESUME_SENT", "RESUME_REQUESTED"}:
         watch["resume"] = watch["resume"] or "existing"
     incoming = [m for m in fresh if m.role == "recruiter"]
     action = None
+    ai_mode = rule["reply_mode"] == "ai"
+    pending = watch.get("ai_pending")
+    if pending and (pending["trigger"] != ids[-1] or pending["revision"] != rule["revision"]):
+        watch.pop("ai_pending")
     if incoming:
         event_id = hashlib.sha256((item["id"] + "/" + incoming[-1].id).encode()).hexdigest()
         if not db.get("follow_notice", event_id):
@@ -146,15 +244,27 @@ def collect(db, key, rule, data):
             first = not watch["reply"]
             finished = watch["reply"] == "manual" or (watch["reply"] == "sent" and watch["resume"] in {"sent", "requested", "existing", "review", "manual", "awaiting_confirmation"})
             message = rule["message"] if first else rule.get("later_message", "")
-            if message and (first or finished) and data.messages[-1].role == "recruiter" and any(m.role == "me" for m in data.messages):
+            if ai_mode and (first or finished or watch["reply"] == "sent") and data.messages[-1].role == "recruiter" and (data.opened_chat or any(m.role == "me" for m in data.messages)):
+                watch["ai_pending"] = dict(trigger=ids[-1], revision=rule["revision"], next_attempt=0, attempts=0,
+                                           opening=opening or getattr(data, "catch_up", False))
+            elif not ai_mode and message and (first or finished) and data.messages[-1].role == "recruiter" and (data.opened_chat or any(m.role == "me" for m in data.messages)):
                 watch.update(reply="reserved", filename=watch.get("filename", rule["resume_label"]), reply_text=message, lease=secrets.token_urlsafe(24), expires_at=time.time()+90)
                 action = dict(id=item["id"], account_label=data.account_label, title=item["title"], company=item["company"],
-                              contact=data.contact, trigger=ids[-1], expires_at=watch["expires_at"], lease=watch["lease"],
-                              message=message, resume_label=rule["resume_label"], direct_resume=not rule["resume_label"], confirmation=rule["confirmation"], send_resume=first and not watch["resume"])
+                              contact=data.contact, thread_anchor=item.get("anchor"), trigger=ids[-1], expires_at=watch["expires_at"], lease=watch["lease"],
+                              message=message, resume_label=rule["resume_label"], direct_resume=not rule["resume_label"], confirmation="personal" if item.get("source") == "manual_chat" else rule["confirmation"], send_resume=first and not getattr(data, "catch_up", False) and not opening and not watch["resume"])
             elif not watch["reply"] and data.messages[-1].role == "me":
                 watch["reply"] = "manual"
                 watch["resume"] = watch["resume"] or "manual"
+    pending = watch.get("ai_pending")
+    if ai_mode and pending and pending["next_attempt"] <= time.time():
+        pending.update(token=secrets.token_urlsafe(24), next_attempt=time.time()+120, attempts=pending["attempts"]+1)
+        db.put("follow_watch", watch)
+        return {"opening": pending.get("opening", data.opened_chat and not confirmed_greeting), "generate": pending["token"], "title": item["title"], "previous": watch.get("last_sent_text", "")}
     db.put("follow_watch", watch)
+    if ai_mode and pending:
+        wait = max(1, int(pending["next_attempt"] - time.time()) + 1)
+        reason = watch.get("reason") or "AI 正在生成回复"
+        return {"action": None, "status": f"{reason} · 约 {wait} 秒后可重试"}
     return {"action": action, "status": "已检查新回复" if same_session or fresh else "已记录当前会话基线"}
 
 
@@ -258,8 +368,14 @@ def mount_followups(app, service, connector, admin):
                     if len(events) == 10:
                         break
             return {**public(rule), "events": events,
-                    "actions": [{k: w.get(k, "") for k in ("job_id", "reply", "resume", "reason")}
-                                for w in reversed(db.all("follow_watch")) if w["connection_id"] == key and w["reply"]][:20]}
+                    "actions": [{k: w.get(k, "") for k in ("job_id", "reply", "resume", "reason", "last_sent_text")}
+                                for w in reversed(db.all("follow_watch")) if w["connection_id"] == key and (w["reply"] or w.get("reason"))][:20]}
+
+    @app.get("/api/boss/connections/{key}/followup/history", dependencies=[Depends(admin)])
+    def history(key: str):
+        with store.transaction() as db:
+            return {"threads": sorted((h for h in db.all("follow_history") if h["connection_id"] == key),
+                                      key=lambda h: h["updated"], reverse=True)}
 
     @app.put("/api/boss/connections/{key}/followup", dependencies=[Depends(admin)])
     def save(key: str, data: Rule):
@@ -269,11 +385,11 @@ def mount_followups(app, service, connector, admin):
             hook = data.webhook.strip() or old["webhook"]
             require(not hook or HOOK.fullmatch(hook), "请输入飞书自定义机器人的完整 Webhook", 422)
             rule = dict(id=key, enabled=data.enabled, account_label=data.account_label.strip(), message=data.message.strip(),
-                        confirmation=data.confirmation, later_message=data.later_message.strip(), resume_label=data.resume_label.strip(), webhook=hook, secret=data.secret.strip() or (old["secret"] if hook == old["webhook"] else ""),
+                        reply_mode=data.reply_mode, confirmation=data.confirmation, later_message=data.later_message.strip(), resume_label=data.resume_label.strip(), webhook=hook, secret=data.secret.strip() or (old["secret"] if hook == old["webhook"] else ""),
                         since=time.time(), revision=uuid.uuid4().hex)
-            require(not data.enabled or all(rule[k] for k in ("account_label", "message", "webhook")),
-                    "开启前请填写账号、首次回复文字和飞书 Webhook", 422)
-            if any(rule[k] != old.get(k, "") for k in ("confirmation", "enabled", "account_label", "message", "later_message", "resume_label", "webhook", "secret")):
+            require(not data.enabled or (rule["account_label"] and rule["webhook"] and (rule["reply_mode"] == "ai" or rule["message"])),
+                    "开启前请填写账号和飞书 Webhook；固定文字模式还需填写首次回复", 422)
+            if any(rule[k] != old.get(k, "") for k in ("reply_mode", "confirmation", "enabled", "account_label", "message", "later_message", "resume_label", "webhook", "secret")):
                 db.put("follow_rule", rule)
             return public(rule)
 
@@ -291,23 +407,100 @@ def mount_followups(app, service, connector, admin):
         with store.transaction() as db:
             auth(db, key, request)
             rule = settings(db, key)
-            return {"revision": rule["revision"], "account_label": rule["account_label"], "enabled": rule["enabled"],
+            return {"opened_history": True, "current_chat": True, "revision": rule["revision"], "account_label": rule["account_label"], "enabled": rule["enabled"],
+                    "threads": [{k: t[k] for k in ("id","title","company","source","contact")}
+                                for t in db.all("follow_thread") if eligible(db, key, rule, t)],
                     "items": [{**{k: i[k] for k in ("id", "title", "company", "source")},
                                "resume_label": (db.get("follow_watch", i["id"]) or {}).get("filename", rule["resume_label"])}
                               for i in db.all("application_item")
                               if eligible(db, key, rule, i)] if rule["enabled"] else []}
 
+    @app.post("/api/connector/{key}/followup/current")
+    def current_chat(key: str, data: CurrentChat, request: Request):
+        with store.transaction() as db:
+            auth(db, key, request)
+            rule = settings(db, key)
+            require(rule["enabled"] and rule["revision"] == data.revision and rule["account_label"] == data.account_label,
+                    "账号或跟进设置已变化")
+            mine = [m.id for m in data.messages if m.role == "me"]
+            require(mine or data.opened_chat, "尚未与这位 HR 沟通过")
+            # Bind to platform message IDs as well as visible labels, never to a name alone.
+            threads = [t for t in db.all("follow_thread") if t["connection_id"] == key
+                       and t["contact"] == data.contact and t["title"] == data.title
+                       and t["account_label"] == data.account_label]
+            require(len(threads) <= 1, "会话身份不唯一")
+            if threads:
+                item = threads[0]
+                visible_ids = {m.id for m in data.messages}
+                if item["anchor"] not in visible_ids and data.opened_chat:
+                    saved = db.get("follow_history", item["id"])
+                    shared = visible_ids.intersection(m["id"] for m in saved["messages"]) if saved else set()
+                    if shared:
+                        item["anchor"] = next(m.id for m in data.messages if m.id in shared)
+                        db.put("follow_thread", item)
+                require(item["anchor"] in visible_ids, "请在 BOSS 加载上次核对的聊天记录")
+            else:
+                item = dict(id=uuid.uuid4().hex, job_id="", source="manual_chat", connection_id=key,
+                            account_label=data.account_label, contact=data.contact, company=data.company,
+                            title=data.title, anchor=mine[0] if mine else data.messages[0].id, state="ALREADY_CONTACTED")
+                db.put("follow_thread", item)
+            data.item_id = item["id"]
+        return scan(key, data, request)
+
     @app.post("/api/connector/{key}/followup/scan")
     def scan(key: str, data: Scan, request: Request):
         with store.transaction() as db:
             auth(db, key, request)
-            return collect(db, key, settings(db, key), data)
+            result = collect(db, key, settings(db, key), data, archive_only=os.getenv("JOB_AGENT_CHAT_ARCHIVE_ONLY") == "1")
+        if "generate" not in result:
+            return result
+
+        # Never hold the SQLite transaction while waiting for the model or Feishu.
+        history = [{"speaker": "HR" if m.role == "recruiter" else "本人", "text": redact(m.text)[:1000]}
+                   for m in data.messages[-20:] if m.text.strip()]
+        message, closing, error = "", False, ""
+        if not redact(data.messages[-1].text):
+            error = "来信缺少可用于回复的文字"
+        else:
+            try:
+                message, closing = service.model.recruiter_reply(result["title"], history, result["previous"])
+            except MatchError as exc:
+                error = str(exc)
+
+        with store.transaction() as db:
+            auth(db, key, request)
+            watch = db.get("follow_watch", data.item_id)
+            rule = settings(db, key)
+            item = follow_item(db, data.item_id)
+            pending = (watch or {}).get("ai_pending", {})
+            if (not eligible(db, key, rule, item) or rule["revision"] != data.revision
+                    or pending.get("token") != result["generate"] or watch["cursor"] != data.messages[-1].id):
+                return {"action": None, "status": "会话或设置已变化，已取消这条 AI 回复"}
+            if error:
+                watch["reason"] = "AI 回复待生成 · " + error
+                if not redact(data.messages[-1].text):
+                    watch.pop("ai_pending")
+                else:
+                    pending["next_attempt"] = time.time() + min(300, 15 * min(pending["attempts"], 20))
+                db.put("follow_watch", watch)
+                return {"action": None, "status": watch["reason"]}
+            watch.pop("ai_pending")
+            first = not watch["reply"]
+            watch.update(reply="reserved", filename=rule["resume_label"], reply_text=message,
+                         lease=secrets.token_urlsafe(24), expires_at=time.time()+90, reason="")
+            db.put("follow_watch", watch)
+            return {"status": "已按当前 HR 来信生成回复", "action": dict(
+                id=item["id"], account_label=data.account_label, title=item["title"], company=item["company"],
+                contact=data.contact, thread_anchor=item.get("anchor"), trigger=data.messages[-1].id, expires_at=watch["expires_at"], lease=watch["lease"],
+                message=message, resume_label=rule["resume_label"], direct_resume=not rule["resume_label"],
+                confirmation="personal" if item.get("source") == "manual_chat" else rule["confirmation"], send_resume=first and not closing and not result["opening"] and not getattr(data, "catch_up", False) and not watch["resume"])}
 
     @app.post("/api/connector/{key}/followup/progress")
     def progress(key: str, data: Progress, request: Request):
         with store.transaction() as db:
             auth(db, key, request)
-            item = service.entity(db, "application_item", data.item_id)
+            item = follow_item(db, data.item_id)
+            require(item is not None, "跟进会话不存在", 404)
             watch = service.entity(db, "follow_watch", item["id"])
             rule = settings(db, key)
             require(item["connection_id"] == key and secrets.compare_digest(watch.get("lease", ""), data.lease)
@@ -318,12 +511,12 @@ def mount_followups(app, service, connector, admin):
                         and time.time() < watch["expires_at"], "跟进已暂停或过期")
                 require((stage == "reply" and watch["reply"] == "reserved") or
                         (stage == "resume" and watch["reply"] == "sent" and not watch["resume"]), "该步骤已处理")
-                if stage == "resume" and rule["confirmation"] == "personal":
+                if stage == "resume" and (rule["confirmation"] == "personal" or item.get("source") == "manual_chat"):
                     require(data.personal_confirmation, "请重新加载扩展以启用本人确认发送")
                 watch[stage] = "sending"
                 if stage == "resume":
                     watch["file_baseline"] = data.baseline_ids
-                    if rule["confirmation"] == "personal":
+                    if rule["confirmation"] == "personal" or item.get("source") == "manual_chat":
                         watch[stage] = "awaiting_confirmation"
             else:
                 require(watch[stage] == "sending" or (data.outcome == "review" and watch[stage] in {"", "reserved", "awaiting_confirmation"}), "该步骤已结束")
@@ -332,6 +525,8 @@ def mount_followups(app, service, connector, admin):
                             or (stage == "resume" and ((data.outcome == "sent" and follow_delivery(data.evidence, watch["filename"]))
                             or (data.outcome == "requested" and "简历" in data.evidence and re.search(r"请求|申请|对方同意", data.evidence))))),
                             "回执与跟进内容不符")
+                if stage == "reply" and data.outcome == "sent":
+                    watch["last_sent_text"] = watch["reply_text"]
                 watch[stage] = data.outcome
                 watch["reason"] = data.reason
                 if stage == "resume" and data.outcome == "sent":

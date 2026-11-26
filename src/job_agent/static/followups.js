@@ -6,7 +6,7 @@
   const labels={awaiting_confirmation:'等待本人确认或发送回执',queued:'待发',sending:'发送中，待确认',reserved:'已领取，待确认',sent:'已发送',requested:'已请求发送',existing:'已有发送记录',
     failed:'发送失败，请检查机器人设置',unknown:'结果待核对',review:'需在 BOSS 核对',manual:'已人工回复',cancelled:'已取消'};
   const form=document.querySelector('#followup-form'),testButton=document.querySelector('#followup-test');
-  const textFields=['account_label','message','later_message','resume_label','confirmation'];
+  const textFields=['reply_mode','account_label','message','later_message','resume_label','confirmation'];
   const path=key=>'/api/boss/connections/'+encodeURIComponent(key)+'/followup';
   const selectedKey='job-agent.followup.connection';
   const draftKey=id=>'job-agent.followup.draft.'+id;
@@ -25,27 +25,52 @@
   function controls(){
     const ready=!!loaded&&select.value===loaded;
     for(const k of [...textFields,'webhook','secret','enabled'])fields[k].disabled=!ready;
+    for(const label of form.querySelectorAll('[data-template-reply]'))label.hidden=fields.reply_mode.value!=='template';
     form.querySelector('[type=submit]').disabled=testButton.disabled=!ready;
   }
   form.addEventListener('input',e=>{
     if(loaded!==select.value||!loaded||!textFields.includes(e.target.name))return;
+    if(e.target===fields.reply_mode)controls();
     const draft=readStored(draftKey(loaded))||{};
     draft[e.target.name]=e.target.value;store(draftKey(loaded),draft);
     feedback.textContent='已在此浏览器保留草稿，点击“保存跟进设置”生效。';
   });
+  const historyBox=document.querySelector('#followup-history'),transcripts=document.querySelector('#followup-transcripts');
+  async function showHistory(){
+    const key=loaded;
+    if(!historyBox.open||!key)return;
+    try{
+      const {threads}=await api(path(key)+'/history');
+      if(key!==loaded)return;
+      transcripts.replaceChildren();
+      for(const thread of threads){
+        const entry=document.createElement('details'),heading=document.createElement('summary');
+        heading.textContent=thread.contact.replace(/\s+/g,' ')+' · '+thread.title+' · '+thread.messages.length+' 条';
+        entry.append(heading);
+        for(const message of thread.messages){
+          const line=document.createElement('p');
+          line.textContent=(message.role==='me'?'我：':'HR：')+(message.text||'［非文字消息］');
+          entry.append(line);
+        }
+        transcripts.append(entry);
+      }
+      if(!threads.length)transcripts.textContent='尚无已保存的会话。';
+    }catch(e){if(key===loaded)report(e);}
+  }
+  historyBox.addEventListener('toggle',showHistory);
   function showLog(data){
     log.replaceChildren();
     const add=text=>{const p=document.createElement('p');p.textContent=text;log.append(p);};
     for(const e of data.events)add(e.company+' · '+e.title+' · '+new Date(e.at*1000).toLocaleString()+' · HR 新消息 '+e.count+' 条 · 飞书'+(labels[e.status]||e.status)+(e.preview?' · HR：'+e.preview:'')+(e.detail?' · '+e.detail:''));
     for(const a of data.actions){
       const job=state.jobs.find(j=>j.id===a.job_id);
-      add((job?job.company+' · '+job.title:'该岗位')+' · 回复'+labels[a.reply]+' · 附件'+(labels[a.resume]||'未发送')+(a.reason?' · '+a.reason:''));
+      add((job?job.company+' · '+job.title:'该岗位')+' · 回复'+(labels[a.reply]||'待生成')+(a.last_sent_text?'「'+a.last_sent_text+'」':'')+' · 附件'+(labels[a.resume]||'未发送')+(a.reason?' · '+a.reason:''));
     }
     if(!log.children.length)add('尚无跟进记录。');
   }
   async function load(){
     const key=select.value,token=++request;
-    loaded='';feedback.textContent='';controls();log.replaceChildren();
+    loaded='';feedback.textContent='';controls();log.replaceChildren();transcripts.replaceChildren();
     for(const k of [...textFields,'webhook','secret'])fields[k].value='';
     fields.enabled.checked=false;
     fields.webhook.placeholder='粘贴飞书自定义机器人地址';
@@ -55,11 +80,11 @@
       const data=await api(path(key));
       if(request!==token)return;
       const draft=readStored(draftKey(key))||{};
-      for(const k of textFields)fields[k].value=draft[k]??data[k]??(k==='confirmation'?'personal':'');
+      for(const k of textFields)fields[k].value=draft[k]??data[k]??(k==='confirmation'?'personal':k==='reply_mode'?'ai':'');
       fields.enabled.checked=data.enabled;
       if(data.webhook_configured)fields.webhook.placeholder='已保存，无需重填；更换机器人时填写';
       if(data.signed)fields.secret.placeholder='已保存签名，无需重填';
-      loaded=key;controls();showLog(data);
+      loaded=key;controls();showLog(data);void showHistory();
       feedback.textContent=(data.enabled?'当前已开启':'当前已关闭')+(Object.keys(draft).length?' · 已恢复未保存的草稿':'');
     }catch(error){if(request===token)report(error);}
   }
@@ -93,7 +118,7 @@
   document.querySelector('#followup-refresh').onclick=async()=>{
     if(!loaded){await initialize();return;}
     const key=loaded;
-    try{const data=await api(path(key));if(key===loaded)showLog(data);}
+    try{const data=await api(path(key));if(key===loaded){showLog(data);await showHistory();}}
     catch(error){if(key===loaded)report(error);}
   };
   testButton.onclick=async()=>{

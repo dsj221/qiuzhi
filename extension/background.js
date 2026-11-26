@@ -1,8 +1,8 @@
 'use strict';
-importScripts('reply-scanner.js');
+importScripts('message-bridge.js','reply-scanner.js');
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
 chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});
-const routes={FOLLOW_TARGETS:['GET','/followup'],FOLLOW_SCAN:['POST','/followup/scan'],FOLLOW_PROGRESS:['POST','/followup/progress'],JOBS:['GET','/jobs'],IMPORT_JOB:['POST','/jobs'],IMPORT_CHAT_JOB:['POST','/chat-job'],OBSERVE:['POST','/observations'],CLAIM:['POST','/claim'],SEARCH:['GET','/search'],COLLECT:['POST','/opportunities'],AUTO_DRAFTS:['POST','/applications/drafts'],APPLICATIONS:['GET','/applications'],APP_CLAIM:['POST','/applications/claim']};
+const routes={FOLLOW_CURRENT:['POST','/followup/current'],FOLLOW_TARGETS:['GET','/followup'],FOLLOW_SCAN:['POST','/followup/scan'],FOLLOW_PROGRESS:['POST','/followup/progress'],JOBS:['GET','/jobs'],IMPORT_JOB:['POST','/jobs'],IMPORT_CHAT_JOB:['POST','/chat-job'],OBSERVE:['POST','/observations'],CLAIM:['POST','/claim'],SEARCH:['GET','/search'],COLLECT:['POST','/opportunities'],AUTO_DRAFTS:['POST','/applications/drafts'],APPLICATIONS:['GET','/applications'],APP_CLAIM:['POST','/applications/claim']};
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('panel.html'))return false;
   (async()=>{
@@ -55,7 +55,7 @@ const workerScan=createReplyScanner({
   page:async(type,extra,tabId)=>{
     const tab=await chrome.tabs.get(tabId);
     if(!tab.active||!isChat(tab.url))throw Error('当前会话已离开前台');
-    const result=await chrome.tabs.sendMessage(tabId,{type,...extra});
+    const result=await tabMessage(tab,{type,...extra});
     if(!result?.ok)throw Error(result?.error||'BOSS 页面未就绪');
     return result.data;
   },

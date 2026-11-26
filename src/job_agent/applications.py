@@ -58,6 +58,7 @@ class ApplicationClaim(BaseModel):
 
 
 class PreflightInput(BaseModel):
+    recruiter_receipt: str = Field(default='', max_length=200)
     lease: str
     stage: Literal['open_chat', 'send_greeting', 'send_resume']
     account_label: str
@@ -110,6 +111,7 @@ class Applications:
                                        **({'search_url': item['search_url']} if item.get('search_url') else {})} for item in items]})
 
     def create(self, data):
+        self.sweep()
         with self.service.store.transaction() as db:
             return self.create_in(db, data)
 
@@ -122,6 +124,7 @@ class Applications:
             return {'account_label': connection['auto_greeting_account']}
 
     def prepare_automatic(self, key, token, request):
+        self.sweep()
         with self.service.store.transaction() as db:
             connection = self.connector.authenticate(db, key, token)
             profile = db.get('profile', 'me')
@@ -234,13 +237,15 @@ class Applications:
             for batch in db.all('application_batch'):
                 items = [i for i in db.all('application_item') if i['batch_id'] == batch['id']]
                 timed_out = [i for i in items if i['state'] == 'RUNNING' and i.get('lease_until', 0) < now]
-                expired = batch['state'] in {'APPROVED', 'RUNNING'} and batch.get('expires_at', 0) < now
+                timed_batch = batch['state'] in {'APPROVED', 'RUNNING'} or (
+                    batch['state'] == 'NEEDS_REVIEW' and 'expires_at' in batch)
+                expired = timed_batch and batch.get('expires_at', 0) <= now
                 for item in items:
                     if item in timed_out or (expired and item['state'] == 'RUNNING'):
                         item.update(state='UNKNOWN', reason='执行超时，结果待核对，不会自动重试')
                         db.put('application_item', item)
                     elif expired and item['state'] == 'PENDING':
-                        item.update(state='CANCELLED', reason='批次确认已过期')
+                        item.update(state='CANCELLED', reason='批次确认已过期，此岗位未执行，可重新筛选')
                         db.put('application_item', item)
                 if expired:
                     batch['state'] = 'EXPIRED'
@@ -313,6 +318,7 @@ class Applications:
             self.current(db, batch)
             require(data['target_verified'] and data['account_label'] == batch['account_label'], '当前账号或目标岗位未核对')
             if data['stage'] == 'send_resume':
+                require(data['recruiter_receipt'] and data['recruiter_receipt'] in data['message_ids'], '尚未核对当前 HR 来信，暂不发送简历')
                 require(item['mode'] == 'resume' and data['resume_label'] == item['resume_label'], '当前简历名称与批次确认内容不一致')
             if data['stage'] == 'send_greeting':
                 require(item['mode'] == 'greeting', '该批次未授权发送招呼消息')

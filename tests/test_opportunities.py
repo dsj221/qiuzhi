@@ -47,7 +47,7 @@ def claim(client, connection, headers, source, prepared):
 def preflight(client, connection, headers, action, stage='send_resume', **overrides):
     return client.post('/api/connector/' + connection['connection_id'] + '/applications/' + action['id'] + '/preflight', headers=headers,
                        json={'lease': action['lease'], 'stage': stage, 'target_verified': True, 'account_label': '测试账号',
-                             'resume_label': '本人简历.pdf', 'message_ids': ['old-receipt'], **overrides})
+                             'resume_label': '本人简历.pdf', 'message_ids': ['old-receipt'], 'recruiter_receipt': 'old-receipt', **overrides})
 
 
 def result(client, connection, headers, action, **overrides):
@@ -205,6 +205,34 @@ def test_expired_lease_is_unknown_and_batch_expiry_cancels_pending(client):
     assert summary['items'][0]['state'] == 'UNKNOWN' and summary['batches'][0]['state'] == 'NEEDS_REVIEW'
     assert preflight(client, connection, headers, action).status_code == 409
     assert client.get('/api/connector/' + connection['connection_id'] + '/applications', headers=headers).json()['items'] == []
+
+
+def test_paused_batch_expires_unstarted_targets_and_keeps_unknown_receiptable(client, monkeypatch):
+    connection, headers = setup(client)
+    monkeypatch.setattr(client.app.state.opportunities, 'screen', lambda *args: {
+        'result': 'matched', 'requirements': [], 'report': {'engine': 'model'}})
+    jobs = [job('first'), job('second')]
+    opportunities = collect(client, connection, headers, jobs).json()['opportunities']
+    options = {'connection_id': connection['connection_id'], 'account_label': '测试账号',
+               'opportunity_ids': [op['id'] for op in opportunities], 'mode': 'greeting'}
+    prepared = client.post('/api/applications', json=options).json()
+    assert approve(client, prepared).status_code == 200
+    action = claim(client, connection, headers, jobs[0], prepared).json()['action']
+    assert preflight(client, connection, headers, action, stage='send_greeting').status_code == 200
+    assert result(client, connection, headers, action, outcome='UNKNOWN').status_code == 200
+    with client.app.state.service.store.transaction() as db:
+        batch = db.get('application_batch', prepared['batch']['id'])
+        batch['expires_at'] = time.time() - 1
+        db.put('application_batch', batch)
+    # A fresh batch may be prepared without first opening the summary page.
+    for index, expected in [(0, 409), (1, 200)]:
+        new = client.post('/api/applications', json={**options, 'opportunity_ids': [opportunities[index]['id']]})
+        assert new.status_code == expected
+    summary = client.get('/api/applications').json()
+    states = {i['external_id']: i['state'] for i in summary['items'] if i['batch_id'] == batch['id']}
+    assert states == {'first': 'UNKNOWN', 'second': 'CANCELLED'}
+    base = '/api/connector/' + connection['connection_id'] + '/applications'
+    assert [i['id'] for i in client.get(base + '/receipts', headers=headers).json()['items']] == [action['id']]
 
 
 def test_demo_resume_blocks_real_approval_but_can_test_fixture(client):
