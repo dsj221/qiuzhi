@@ -26,6 +26,7 @@ function harness(options={}){
   const page=async(type,{action}={})=>{
     calls.push(type);
     if(type==='PIPE_ACCOUNT')return {account_label:options.other?'其他':account};
+    if(type==='FOLLOW_OPEN_UNREAD'&&options.unread)return options.unread;
     if(type==='FOLLOW_OPEN_CHAT'){
       reads++;
       if(options.empty&&!selected)return {};
@@ -91,4 +92,14 @@ test('archives the selected thread without switching chats and sends only after 
   assert.ok(!h.calls.includes('PIPE_SELECT_CHAT'));
   const changed=harness({opened:true,switched:true});await changed.tick();
   assert.ok(!changed.calls.includes('PIPE_PREPARE_GREETING'));
+});
+
+
+test('a stale chat header after an unread click cannot trigger a reply',async()=>{
+  for(const unread of [{name:'另一位 HR',labels:['公司']},{name:'HR',labels:['另一家公司']}]){
+    const h=harness({opened:true,unread});
+    await h.tick('inbox');
+    assert.ok(h.calls.includes('FOLLOW_OPEN_UNREAD'));
+    assert.ok(!h.calls.includes('PIPE_PREPARE_GREETING'));
+  }
 });

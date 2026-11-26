@@ -3,13 +3,13 @@
 function createReplyScanner({api,page,getProfile,check,report,monitor}){
   const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const realProfile=fetch(chrome.runtime.getURL('boss-chat-profile.json')).then(r=>r.json());
-  let cursor=0,nextRotation=0,lastOpened='';
+  let cursor=0,nextRotation=0;
   return async function inspect(tab,fixture,reason,workflow=false){
     const plan=await api('FOLLOW_TARGETS');
     monitor(null);
     if(!plan.enabled){report('在工作台「HR 回复跟进」开启后开始监听。');return;}
     const items=plan.items.filter(i=>(i.source==='fixture')===fixture);
-    if(workflow&&!fixture){
+    if(!fixture){
       const isBatch=t=>items.some(i=>i.source!=='manual_chat'&&i.title===t.title&&i.company===t.company);
       items.push(...(plan.threads||[]).filter(t=>!isBatch(t)));
     }
@@ -29,11 +29,31 @@ function createReplyScanner({api,page,getProfile,check,report,monitor}){
     if(opened){
       if(!plan.opened_history)throw Error('请重启工作台以启用当前会话历史保存');
       const context={items:items.map(({id,title,company,contact})=>({id,title,company,contact})),
-        action:{account_label:plan.account_label,expires_at:Date.now()/1000+90}};
-      let first=await call('FOLLOW_OPEN_CHAT',context);
-      const identity=view=>JSON.stringify([tab.id,view.title,view.snapshot?.contact,view.snapshot?.messages.at(-1)?.id]);
-      const settled=!first.snapshot||identity(first)===lastOpened;
-      if(workflow&&items.length&&!catchUp&&!first.drafting&&settled&&Date.now()>=nextRotation){
+        action:{account_label:plan.account_label,revision:plan.revision,expires_at:Date.now()/1000+90}};
+      const unread=!catchUp&&reason!=='chat'?await call('FOLLOW_OPEN_UNREAD',{action:context.action}):{};
+      if(unread.waiting){report(unread.waiting);return;}
+      let first;
+      if(unread.labels){
+        report('收到新消息，正在核对招聘方和聊天记录');
+        for(let attempt=0;attempt<8;attempt++){
+          await delay(250);
+          try{first=await call('FOLLOW_OPEN_CHAT',context);}
+          catch(error){if(error.message!=='尚无可核对的聊天记录')throw error;}
+          const name=first?.snapshot?.contact.split('\n')[0];
+          if(name===unread.name&&unread.labels.includes(first.company)&&
+              first.snapshot.messages.at(-1)?.role==='recruiter')break;
+          first=null;
+        }
+        if(!first){report('未能核对新消息的招聘方和聊天记录');return;}
+      }else{
+        try{first=await call('FOLLOW_OPEN_CHAT',context);}
+        catch(error){
+          if(error.message!=='尚无可核对的聊天记录')throw error;
+          report('正在监听联系人列表，等待新来信。');return;
+        }
+      }
+      if(first.waiting){report(first.waiting);return;}
+      if(workflow&&items.length&&!catchUp&&!first.drafting&&!first.snapshot&&Date.now()>=nextRotation){
         nextRotation=Date.now()+10000;
         const hinted=reason==='inbox'?await call('FOLLOW_HINT',{reason,items:context.items}):null;
         const next=items.find(i=>hinted?.id===i.id)||items[cursor++%items.length];
@@ -47,7 +67,7 @@ function createReplyScanner({api,page,getProfile,check,report,monitor}){
           if(first.id!==next.id){report('等待核对所选岗位的聊天记录');return;}
         }
       }
-      if(!first.snapshot){report('等待读取当前会话。');return;}
+      if(!first.snapshot){report('正在监听联系人列表，等待新来信。');return;}
       await delay(300);
       const current=await call('FOLLOW_OPEN_CHAT',context);
       if(!current.snapshot||first.snapshot.contact!==current.snapshot.contact||first.title!==current.title||
@@ -57,7 +77,6 @@ function createReplyScanner({api,page,getProfile,check,report,monitor}){
       item=current.id?items.find(i=>i.id===current.id):{title:current.title,company:current.company};
       if(!item)return;
       snapshot=current.snapshot;manual=!current.id||item.source==='manual_chat';drafting=current.drafting;
-      lastOpened=identity(current);
       report(item.company+' · '+item.title+' · 正在检查当前会话');
     }
     if(!manual&&catchUp){report('请选择已有本人消息的手动沟通会话。');return;}

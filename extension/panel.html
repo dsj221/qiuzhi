@@ -5,7 +5,7 @@
 <label for="automatic-mode">批次执行方式</label><select id="automatic-mode"><option value="greeting">发送招呼，记为沟通中</option><option value="resume">发送指定附件简历</option></select>
 <label id="automatic-resume-field" hidden>附件简历完整名称<input id="automatic-resume" maxlength="160"></label>
 <label class="check"><input id="automatic-enabled" type="checkbox">开启全流程自动运行</label>
-<p class="muted">保持 BOSS 标签页和侧栏打开。选用「发送招呼」并为当前账号开启自动打招呼和 HR 回复跟进后，筛选完成会自动打招呼，再回到聊天页轮询已沟通岗位和已保存的会话。新来信触发飞书提醒，AI 回复和简历发送按跟进设置执行。</p>
+<p class="muted">保持 BOSS 标签页和侧栏打开。选用「发送招呼」并为当前账号开启自动打招呼和 HR 回复跟进后，筛选完成会自动打招呼，再回到聊天页监听新来信。联系人出现新未读时，插件会切换到对应会话。新来信触发飞书提醒，AI 回复和简历发送按跟进设置执行。</p>
 <ol id="workflow-progress" aria-label="自动运行进度">
 <li>配对工作台 <output id="step-pair">等待开始</output></li>
 <li>配置真实页面 <output id="step-profile">等待配对</output></li>

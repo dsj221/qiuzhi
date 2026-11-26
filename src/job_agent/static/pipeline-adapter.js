@@ -67,6 +67,52 @@
       button.click();
     }
     check(action){this.guard();if(this.doc.hidden)throw Error('页面在后台，已暂停投递');if(Date.now()/1000>action.expires_at)throw Error('投递动作已过期');if(this.accountLabel()!==action.account_label)throw Error('显示账号已变化，已停止');}
+    openUnread(action,inbox){
+      this.check(action);
+      const list=this.doc.querySelector(this.profile.chatListSelector||'.user-list-content');
+      if(!list||!this.visible(list))return {};
+      const rows=[...list.querySelectorAll('li')].filter(row=>row.querySelector('.friend-content'));
+      if(!rows.length)return {};
+      const session=JSON.stringify([action.account_label,action.revision]);
+      const initial=inbox.session!==session;
+      if(initial){inbox.session=session;inbox.seen.clear();inbox.expected=null;}
+      let passedKnownRow=false,candidate;
+      for(const row of rows){
+        const title=row.querySelector('.title-box'),name=row.querySelector('.name-text');
+        if(!title||!name||!this.visible(name))continue;
+        const walker=this.doc.createTreeWalker(title,NodeFilter.SHOW_TEXT),labels=[];
+        while(walker.nextNode()){
+          const value=walker.currentNode.textContent.trim();
+          if(value)labels.push(value);
+        }
+        const key=row.getAttribute('data-uid')||row.getAttribute('data-id')||JSON.stringify(labels);
+        const badge=row.querySelector('.notice-badge');
+        const count=badge&&this.visible(badge)?this.text(badge):'';
+        const lastMessage=row.querySelector('.last-msg-text');
+        const preview=lastMessage?this.text(lastMessage):'';
+        const stamp=/^[1-9]\d*\+?$/.test(count)?JSON.stringify([count,preview]):'';
+        const known=inbox.seen.has(key);
+        // A newly loaded page of older contacts can appear below the known list.
+        if(initial||!stamp||(!known&&passedKnownRow)){
+          inbox.seen.set(key,stamp);
+        }else{
+          if(!known)inbox.seen.set(key,'');
+          if(!candidate&&inbox.seen.get(key)!==stamp)candidate={key,name,labels,stamp};
+        }
+        if(known&&!row.querySelector('.friend-top'))passedKnownRow=true;
+      }
+      if(!candidate)return {};
+      const input=this.doc.querySelector(this.profile.inputSelector||'#chat-input');
+      if(input&&this.visible(input)&&(input.isContentEditable?this.text(input):input.value||'').trim())return {waiting:'输入框有草稿，等你处理后再切换'};
+      const dialog=this.profile.resumeDialogSelector||'dialog,[role="dialog"],.dialog-wrap,.dialog-container';
+      if([...this.doc.querySelectorAll(dialog)].some(el=>this.visible(el))||this.directPrompt())return {waiting:'请先处理当前会话的弹窗'};
+      const name=this.text(candidate.name);
+      const previousId=this.receipts().at(-1)?.id;
+      this.activate(candidate.name);
+      inbox.expected={name,labels:candidate.labels,previousId};
+      inbox.seen.set(candidate.key,candidate.stamp);
+      return {name,labels:candidate.labels};
+    }
     open(action){
       this.check(action);if(this.job().external_id!==action.external_id)throw Error('当前岗位与已确认范围不一致');
       const button=this.unique(this.profile.applyOpenSelector||'.job-detail-op a.op-btn-chat');const label=this.text(button);

@@ -336,7 +336,7 @@ window.startJobAutomation=function(engine){
         await chrome.tabs.update(tab.id,{url:chatURL});
       }
       if(route.pathname==='/web/geek/chat'||route.pathname==='/web/geek/jobs'||route.pathname.startsWith('/job_detail/')){
-        step('chat','正在监听已沟通岗位和已保存会话中的 HR 来信');
+        step('chat','正在监听 HR 新来信，收到后会切换会话并按跟进设置回复');
         step('batch','本轮筛选完成；下次条件更新或次日继续搜索');
       }
     }
