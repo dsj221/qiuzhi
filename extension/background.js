@@ -1,7 +1,8 @@
 'use strict';
+importScripts('reply-scanner.js');
 chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
 chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true});
-const routes={JOBS:['GET','/jobs'],IMPORT_JOB:['POST','/jobs'],IMPORT_CHAT_JOB:['POST','/chat-job'],OBSERVE:['POST','/observations'],CLAIM:['POST','/claim'],SEARCH:['GET','/search'],COLLECT:['POST','/opportunities'],AUTO_DRAFTS:['POST','/applications/drafts'],APPLICATIONS:['GET','/applications'],APP_CLAIM:['POST','/applications/claim']};
+const routes={FOLLOW_TARGETS:['GET','/followup'],FOLLOW_SCAN:['POST','/followup/scan'],FOLLOW_PROGRESS:['POST','/followup/progress'],JOBS:['GET','/jobs'],IMPORT_JOB:['POST','/jobs'],IMPORT_CHAT_JOB:['POST','/chat-job'],OBSERVE:['POST','/observations'],CLAIM:['POST','/claim'],SEARCH:['GET','/search'],COLLECT:['POST','/opportunities'],AUTO_DRAFTS:['POST','/applications/drafts'],APPLICATIONS:['GET','/applications'],APP_CLAIM:['POST','/applications/claim']};
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('panel.html'))return false;
   (async()=>{
@@ -31,8 +32,44 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else if(message.type==='APP_RECEIPTS'){method='GET';path='/applications/receipts';}
     else if(['APP_PREFLIGHT','APP_RESULT','APP_STOP','APP_SYNC','APP_DISPATCH'].includes(message.type)&&/^[a-f0-9]{32}$/.test(message.actionId)){method='POST';path='/applications/'+message.actionId+'/'+({APP_DISPATCH:'dispatch',APP_PREFLIGHT:'preflight',APP_RESULT:'result',APP_STOP:'cancel',APP_SYNC:'sync'}[message.type]);}
     else throw Error('不支持的连接器操作');
-    const response=await fetch(pair.base+'/api/connector/'+pair.connection_id+path,{method,credentials:'omit',redirect:'error',headers:{Authorization:'Bearer '+pair.token,'Content-Type':'application/json'},...(method==='POST'?{body:JSON.stringify(message.data)}:{})});
-    const body=await response.json();if(!response.ok)throw Error(typeof body.detail==='string'?body.detail:'本地服务请求失败');return body;
+    return connectorRequest(pair,method,path,message.data);
   })().then(data=>reply({ok:true,data})).catch(error=>reply({ok:false,error:error.message}));
+  return true;
+});
+
+
+async function connectorRequest(pair,method,path,data){
+    const response=await fetch(pair.base+'/api/connector/'+pair.connection_id+path,{method,credentials:'omit',redirect:'error',headers:{Authorization:'Bearer '+pair.token,'Content-Type':'application/json'},...(method==='POST'?{body:JSON.stringify(data)}:{})});
+    const body=await response.json();if(!response.ok)throw Error(typeof body.detail==='string'?body.detail:'本地服务请求失败');return body;
+}
+
+const isChat=url=>/^https:\/\/www\.zhipin\.com\/web\/geek\/chat(?:[/?#]|$)/.test(url||'');
+const workerScan=createReplyScanner({
+  getProfile:async()=>(await chrome.storage.local.get('profile')).profile||{},
+  api:async(type,data)=>{
+    const {pair}=await chrome.storage.local.get('pair');
+    if(!pair)throw Error('请先配对工作台');
+    const [method,path]=routes[type];
+    return connectorRequest(pair,method,path,data);
+  },
+  page:async(type,extra,tabId)=>{
+    const tab=await chrome.tabs.get(tabId);
+    if(!tab.active||!isChat(tab.url))throw Error('当前会话已离开前台');
+    const result=await chrome.tabs.sendMessage(tabId,{type,...extra});
+    if(!result?.ok)throw Error(result?.error||'BOSS 页面未就绪');
+    return result.data;
+  },
+  check:()=>{},monitor:()=>{},report:()=>{}
+});
+chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
+  if(msg.type!=='FOLLOW_WAKE'||sender.id!==chrome.runtime.id||sender.frameId!==0||
+      !sender.tab?.active||!isChat(sender.url)||!isChat(sender.tab.url))return false;
+  (async()=>{
+    const panels=await chrome.runtime.getContexts({contextTypes:['SIDE_PANEL'],windowIds:[sender.tab.windowId]});
+    if(panels.length)return;
+    await navigator.locks.request('job-agent-real-automation',{ifAvailable:true},async lock=>{
+      if(lock)await workerScan(sender.tab,false,msg.reason);
+    });
+  })().then(()=>reply({ok:true}),e=>reply({ok:false,error:e.message}));
   return true;
 });

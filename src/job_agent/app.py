@@ -1,6 +1,8 @@
 import os
 import re
 import secrets
+import threading
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import List, Literal
@@ -15,6 +17,7 @@ from .documents import extract_file
 from .connector import mount_connector
 from .opportunities import mount_opportunities
 from .applications import mount_applications
+from .followups import mount_followups, notify_worker
 from .service import Service, require
 
 
@@ -84,7 +87,22 @@ class RequirementsInput(BaseModel):
 
 def create_app(directory=None, testing=False):
     service = Service(directory or os.getenv("JOB_AGENT_DATA", "data"))
-    app = FastAPI(title="求职 Agent · 个人求职工作台", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(app):
+        service.match_stop.clear()
+        worker = threading.Thread(target=service.match_imports, name="boss-job-matching", daemon=True)
+        worker.start()
+        notices = threading.Thread(target=notify_worker, args=(service,), daemon=True)
+        notices.start()
+        try:
+            yield
+        finally:
+            service.match_stop.set()
+            service.match_wakeup.set()
+            worker.join(timeout=2)
+            notices.join(timeout=8)
+
+    app = FastAPI(lifespan=lifespan, title="求职 Agent · 个人求职工作台", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
     static = Path(__file__).parent / "static"
 
@@ -121,6 +139,7 @@ def create_app(directory=None, testing=False):
     connector = mount_connector(app, service, admin)
     opportunities = mount_opportunities(app, service, connector, admin)
     mount_applications(app, service, connector, opportunities, admin)
+    mount_followups(app, service, connector, admin)
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -128,7 +147,7 @@ def create_app(directory=None, testing=False):
 
     @app.get("/static/{name}")
     def asset(name: str):
-        require(name in {"app.js", "style.css", "boss.js", "boss.css", "boss-adapter.js", "pipeline-adapter.js", "pipeline-fixture.js", "boss-fixture.js", "fixture-profile.json", "boss-regions.json", "opportunities.js", "opportunities.css"}, "文件不存在", 404)
+        require(name in {"app.js", "style.css", "boss.js", "boss.css", "boss-adapter.js", "pipeline-adapter.js", "pipeline-fixture.js", "boss-fixture.js", "fixture-profile.json", "boss-regions.json", "opportunities.js", "opportunities.css", "followups.js"}, "文件不存在", 404)
         media = "text/css" if name.endswith("css") else "application/json" if name.endswith("json") else "application/javascript"
         return Response((static / name).read_text(), media_type=media)
 
@@ -153,6 +172,11 @@ def create_app(directory=None, testing=False):
     @app.put("/api/model/key", dependencies=[Depends(admin)])
     def configure_model(data: ModelKeyInput):
         service.model.save_deepseek_key(data.key)
+        with service.store.transaction() as db:
+            for job in db.all("job"):
+                if job.pop("auto_match_error", None):
+                    db.put("job", job)
+        service.match_wakeup.set()
         return {"configured": True, "model": service.model.name}
 
     @app.get("/api/overview", dependencies=[Depends(admin)])
@@ -182,6 +206,8 @@ def create_app(directory=None, testing=False):
         with service.store.transaction() as db:
             record = service.entity(db, "job", key)
             require(record.get("requirements_need_review"), "此岗位要求已确认；调整时请重新收藏")
+            record.pop("auto_match_error", None)
+            service.match_wakeup.set()
             record.update(requirements=[r.model_dump() for r in data.requirements], requirements_need_review=False, requirements_origin="user-reviewed", report=None)
             return db.put("job", record)
 

@@ -20,6 +20,21 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else if(message.type==='PIPE_SELECT')reply({ok:true,data:pipeline.select(message.external_id)});
     else if(message.type==='PIPE_CURRENT')reply({ok:true,data:pipeline.current()});
     else if(message.type==='PIPE_OPEN')reply({ok:true,data:pipeline.open(message.action)});
+    else if(message.type==='FOLLOW_DIAGNOSE')reply({ok:true,data:pipeline.diagnoseResume(message.label)});
+    else if(message.type==='FOLLOW_HINT'){
+      const clean=s=>s.replace(/\s+/g,'').toLowerCase();
+      let matches=[];
+      if(message.reason==='chat'){
+        const person=pipeline.text(pipeline.unique(pipeline.profile.viewConversationSelector)).split('\n').map(clean);
+        const title=clean(pipeline.text(pipeline.unique(pipeline.profile.viewPositionSelector)).split('\n')[0]);
+        matches=message.items.filter(i=>clean(i.title)===title&&person.includes(clean(i.company)));
+      }else if(changedRow?.isConnected){
+        const labels=[...changedRow.querySelectorAll('span,p,div,a')].map(n=>clean(pipeline.text(n)));
+        matches=message.items.filter(i=>labels.includes(clean(i.company)));
+      }
+      reply({ok:true,data:{id:matches.length===1?matches[0].id:null}});
+    }
+    else if(message.type==='FOLLOW_READ')reply({ok:true,data:pipeline.followRead(message.action)});
     else if(message.type==='PIPE_SELECT_CHAT')reply({ok:true,data:pipeline.selectChat(message.action)});
     else if(message.type==='PIPE_TARGET')reply({ok:true,data:pipeline.chatTarget(message.action)});
     else if(message.type==='PIPE_PREPARE_GREETING')reply({ok:true,data:pipeline.prepareGreeting(message.action)});
@@ -33,3 +48,36 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     else reply({ok:false,error:'不支持的页面操作'});
   }catch(error){reply({ok:false,error:error.message});}
 });
+
+// Only send wake-up signals. The authorized scanner reads the bound conversation
+// again before taking any action. The timer also picks up missed inbox changes.
+let changedRow=null;
+if(location.hostname==='www.zhipin.com'){
+  let wakeTimer,queuedReason;
+  const observing=()=>location.pathname==='/web/geek/chat'&&!document.hidden&&!!chrome.runtime.id;
+  function wake(reason){
+    if(observing())chrome.runtime.sendMessage({type:'FOLLOW_WAKE',reason}).catch(()=>{});
+  }
+  function schedule(reason){
+    if(reason==='chat'||!queuedReason)queuedReason=reason;
+    if(wakeTimer)return;
+    wakeTimer=setTimeout(()=>{wakeTimer=null;const next=queuedReason;queuedReason=null;wake(next);},180);
+  }
+  const observer=new MutationObserver(records=>{
+    if(!observing())return;
+    for(const record of records){
+      const target=record.target.nodeType===1?record.target:record.target.parentElement;
+      if(target?.closest('.user-list-content')){
+        changedRow=target.closest('li,[role="listitem"],.user-item,.user-list-item,.friend-item');
+        if(changedRow)schedule('inbox');
+      }
+      if(target?.closest('.chat-record')&&(target.closest('.item-friend')||
+          [...record.addedNodes].some(n=>n.nodeType===1&&(n.matches('.item-friend')||n.querySelector('.item-friend'))))){
+        schedule('chat');
+      }
+    }
+  });
+  observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
+  const fallback=setInterval(()=>wake(null),5000);
+  window.addEventListener('pagehide',()=>{observer.disconnect();clearInterval(fallback);clearTimeout(wakeTimer);},{once:true});
+}

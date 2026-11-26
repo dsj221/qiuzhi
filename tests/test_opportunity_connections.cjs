@@ -6,20 +6,20 @@ const path=require('node:path');
 
 async function harness(){
   const nodes=new Map(),listeners={},requests=[];
-  const field=()=>({value:'',checked:false});
+  const field=()=>({value:'',checked:false,addEventListener(){}});
   function node(selector){
     if(!nodes.has(selector))nodes.set(selector,{value:'',innerHTML:'',textContent:'',open:false,options:[],elements:{account_label:field()},
       classList:{add(){},remove(){}},contains:()=>false,replaceChildren(...children){this.options=children;},
       addEventListener(type,fn){listeners[selector+':'+type]=fn;},reset(){},showModal(){this.open=true;}});
     return nodes.get(selector);
   }
-  for(const name of ['titles','cities','required_keywords','excluded_companies','min_salary_k','limit','search_limit','min_score','min_coverage','accept_internship','accept_other_cities','auto_favorite'])node('#search-preferences-form').elements[name]=field();
+  for(const name of ['titles','cities','districts','require_all_keywords','required_keywords','excluded_companies','min_salary_k','limit','search_limit','min_score','min_coverage','accept_internship','accept_other_cities','auto_favorite'])node('#search-preferences-form').elements[name]=field();
   const old='a'.repeat(32),current='b'.repeat(32),revoked='c'.repeat(32);
   const connections=[{id:old,label:'我的账号',revoked:false},{id:current,label:'我的账号',revoked:false,labels:{account:'当前本人'}},{id:revoked,label:'我的账号',revoked:true}];
   const opportunity=(id,connection_id)=>({id,connection_id,title:'Python工程师',company:'测试公司',city:'上海',url:'https://www.zhipin.com/job_detail/'+id+'.html',screening:{result:'matched',report:null,requirements:[],reasons:[],excluded_reasons:[],review_reasons:[]}});
   const data={preferences:{titles:['Python'],cities:['上海'],required_keywords:[],excluded_companies:[],min_salary_k:null,limit:10,search_limit:5,min_score:50,min_coverage:.5,revision:1},
     opportunities:[opportunity('one',current),opportunity('two',old),opportunity('revoked',revoked)],has_resume:true};
-  const context={document:{querySelector:node,activeElement:null,addEventListener:(type,fn)=>listeners[type]=fn},
+  const context={fetch:async()=>({json:async()=>({})}),document:{querySelector:node,querySelectorAll:()=>[],activeElement:null,addEventListener:(type,fn)=>listeners[type]=fn},
     setInterval(){},window:{},view:'jobs',esc:String,refresh:async()=>{},toast(){},
     Option:function(text,value){this.text=text;this.value=value;},
     FormData:function(){return [['connection_id',node('#application-connection').value],['account_label','当前本人'],['mode','greeting']];},

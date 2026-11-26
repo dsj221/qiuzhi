@@ -53,7 +53,7 @@
     }
   }
   async function refreshBatches(){const data=await api('APPLICATIONS');q('#application-batch').replaceChildren(new Option('选择已确认批次',''),...data.batches.map(b=>new Option(`${b.id.slice(0,8)} · ${b.mode==='resume'?'发送指定简历':'打招呼'} · ${data.items.filter(i=>i.batch_id===b.id).length} 个待处理`,b.id)));return data;}
-  async function begin(work){if(busy)return;busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
+  async function begin(work){if(busy||followups?.busy()){say('另一项页面操作正在进行，请稍后重试');return;}busy=true;stop();bound=null;operationProfile=JSON.stringify(profile);q('#fill-now').hidden=true;const epoch=++generation;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=true;try{await work(epoch);return true;}catch(error){say('已停止：'+error.message);return false;}finally{busy=false;operationTab=null;currentBatch=null;for(const id of ['collect-jobs','search-jobs','run-applications'])q('#'+id).disabled=false;}}
   async function search(epoch,settings,expectedTab=null,expectedAccount=null){
     const plan=settings.search_plan;if(!plan?.entries.length)throw Error(plan?.warnings?.join('。')||'请先在工作台保存筛选条件');
     const context=await pipe('PIPE_ACCOUNT',{},epoch);operationTab=context.tabId;if((expectedTab!==null&&expectedTab!==operationTab)||(expectedAccount&&expectedAccount!==context.account_label))throw Error('自动搜索的账号或标签页已变化');if(profile.jobSelector==='#fixture-job')throw Error('模拟配置仅支持采集模拟列表；搜索真实岗位前请使用已验证的岗位列表配置');
@@ -66,15 +66,30 @@
     }
     await jobs();return {counts,plan,context};
   }
+  async function greetMatches(settings,account,ids,epoch){
+    if(!ids.length||!settings.auto_greeting_account||settings.auto_greeting_account!==account)return;
+    check(epoch);
+    const prepared=await api('AUTO_DRAFTS',{opportunity_ids:ids,preferences_revision:settings.preferences.revision,
+      resume_revision:settings.resume_revision,account_label:account,mode:'greeting',resume_label:''});
+    if(!prepared.auto_greeting)throw Error('自动招呼设置已变化，请在工作台查看批次');
+    for(const id of prepared.batches){
+      check(epoch);await api('APP_DISPATCH',{},id);check(epoch);
+      await executeBatch(epoch,id);
+    }
+    say('筛选完成，本轮处理 '+prepared.eligible+' 个新的招呼目标。逐项结果可在工作台查看。');
+  }
   q('#search-jobs').onclick=()=>begin(async epoch=>{
-    const {counts,plan}=await search(epoch,await api('SEARCH'));
-    say(`搜索完成：${plan.entries.length}/${plan.total} 组条件，去重读取 ${counts.read} 个岗位，${counts.matched} 个符合，${counts.review} 个待核对。回工作台勾选符合项并预览投递批次。`);
+    const settings=await api('SEARCH');
+    const {counts,plan,context}=await search(epoch,settings);
+    say(`搜索完成：${plan.entries.length}/${plan.total} 组条件，去重读取 ${counts.read} 个岗位，${counts.matched} 个符合，${counts.review} 个待核对。`);
+    await greetMatches(settings,context.account_label,counts.ids,epoch);
   });
   q('#collect-jobs').onclick=()=>begin(async epoch=>{
     const settings=await api('SEARCH');if(!settings.preferences.revision)throw Error('请先在工作台保存筛选条件');
-    const listing=await pipe('PIPE_LIST',{},epoch);operationTab=listing.tabId;const counts={read:0,matched:0,review:0};
+    const listing=await pipe('PIPE_LIST',{},epoch);operationTab=listing.tabId;const counts={read:0,matched:0,review:0,ids:[]};
     await collectListing(listing,settings,epoch,new Set(),counts);
     say(`本页处理完成：${counts.read} 个岗位，${counts.matched} 个符合条件，${counts.review} 个待核对；符合项按工作台设置自动收藏。`);await jobs();
+    await greetMatches(settings,listing.account_label,counts.ids,epoch);
   });
   q('#refresh-batches').onclick=()=>refreshBatches().then(()=>say('已刷新，请核对批次后执行')).catch(error=>say(error.message));
   async function executeBatch(epoch,batchId){
@@ -146,7 +161,9 @@
     }
   }
   async function halt(){generation++;clearInterval(receiptTimer);receiptTimer=null;if(operationTab)void chrome.tabs.sendMessage(operationTab,{type:'PIPE_CANCEL',profile}).catch(()=>{});if(currentBatch){try{await api('APP_STOP',{},currentBatch);}catch{}}say('已停止。可能已点击的动作需核对平台，不自动重试。');}
+  const followups=window.startReplyMonitor?.(()=>busy||importBusy||jdBusy||!!bound||running);
   const automation=window.startJobAutomation?.({
+    monitoringChat:tabId=>followups?.monitors(tabId),
     search,executeBatch,begin,halt,check,syncReceipts,
     occupied:()=>busy||importBusy||jdBusy||!!bound||running,
     status:say

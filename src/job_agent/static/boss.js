@@ -20,8 +20,8 @@
     const connections=data.connections.filter(c=>!c.revoked&&c.session?.job_id===job.id);
       const messages=data.messages.filter(m=>m.job_id===job.id&&connections.some(c=>c.id===m.connection_id&&JSON.stringify(c.session.binding)===JSON.stringify(m.binding))).slice(-30);
     const actions=data.actions.filter(a=>a.job_id===job.id).slice(-5).reverse();
-    const review=job.requirements_need_review?`<form id="boss-requirements-form" class="boss-review"><h3>${job.source==='boss-chat'?'补充当前聊天岗位的JD要求':'校对从 BOSS 导入的岗位要求'}</h3><p class="field-help">${job.source==='boss-chat'?'当前仅从聊天建立了岗位档案，完整JD尚未导入。请补充真实岗位要求，格式为':'岗位正文已导入。请把要求改成'}“要求 | 关键词 | 权重”，再开始匹配。关键词应简洁，例如 Python，而不是整句JD。</p><label>匹配要求<textarea name="requirements" rows="6" required>${esc(job.requirements.map(r=>r.text+' | '+r.keywords.join(',')+' | '+r.weight).join('\n'))}</textarea></label><button type="submit" class="primary">确认岗位要求</button></form>`:'';
-    node.innerHTML=`${job.source?`<p class="boss-source">来源：${job.source==='boss'?'BOSS 直聘当前页面':job.source==='boss-chat'?'BOSS 聊天岗位 · 完整JD待补充':'本机模拟页面'} · 导入后保留岗位快照</p>`:''}${review}<div class="section-heading"><h3>BOSS 沟通</h3><button class="text-button" data-open-boss-connections>管理连接</button></div>${connections.length?`<p class="field-help">只显示当前绑定会话的消息。${connections.some(c=>c.capture_mode==='snapshot')?'当前为页面快照，每次替换旧快照；草稿需回扩展核对并点击填入。':''}${connections.some(c=>c.status==='syncing')?'扩展正在同步。':'当前离线，请在扩展开始同步。'}</p><div class="boss-message-list">${messages.map(m=>`<article class="boss-message ${m.role==='me'?'mine':''}"><small>${m.role==='me'?'我':'招聘方'}${m.snapshot?' · 当前可见快照':m.baseline?' · 历史基线':''}</small><p>${esc(m.text)}</p></article>`).join('')||'<p class="muted">当前会话暂无可见消息。</p>'}</div><form id="boss-draft-form"><label>填入哪个已绑定连接<select name="connection_id">${connections.map(c=>`<option value="${c.id}">${esc(c.label)} · ${labels[c.status]}</option>`).join('')}</select></label><label>沟通草稿<textarea id="boss-draft-text" name="text" rows="4" required maxlength="3000" placeholder="写下你准备回复招聘方的内容。确认后只填入BOSS输入框。">${esc(drafts.get(job.id)||'')}</textarea></label><div class="actions"><button class="secondary" type="submit">保存待确认草稿</button><button type="button" class="text-button" data-boss-greeting ${job.report?'':'disabled'}>用简历证据生成开场草稿</button></div></form>`:'<div class="notice">在扩展中使用“求职聊天快照配置”，核对并绑定当前会话，可同步可见消息。草稿需先在此确认，再回扩展核对当前会话并点击填入。刷新或切换会话后重新绑定。</div>'}${actions.map(a=>`<article class="boss-action"><span class="badge">${actionLabels[a.state]}</span><p>${esc(a.text)}</p>${a.state==='DRAFT'?`<button class="primary" data-boss-approve="${a.id}">${a.capture_mode==='snapshot'?'确认草稿，再到扩展填入':'确认并填入 BOSS 输入框'}</button>`:''}${['UNKNOWN','FILLING','FILLED'].includes(a.state)?`<button class="secondary" data-boss-resolve="${a.id}">${a.state==='FILLED'?'我已在 BOSS 核对草稿状态':'我已检查 BOSS 输入框，结束此动作'}</button>`:''}</article>`).join('')}<p class="field-help">填入输入框不表示已发送或已投递。聊天草稿请在平台核对后自行发送；已确认投递批次会按明确平台回执同步进度。</p>`;
+    const review=job.requirements_need_review&&(!job.auto_match_state||job.auto_match_state==='waiting_jd'||job.auto_match_state==='failed')?`<details class="boss-review"><summary>手动补充岗位要求（可选）</summary><form id="boss-requirements-form"><p class="field-help">每行填写一项，格式为“要求 | 关键词 | 权重”。</p><label>匹配要求<textarea name="requirements" rows="6" required>${esc(job.requirements.map(r=>r.text+' | '+r.keywords.join(',')+' | '+r.weight).join('\n'))}</textarea></label><button type="submit" class="primary">保存岗位要求</button></form></details>`:'';
+    node.innerHTML=`${job.source?`<p class="boss-source">来源：${job.source==='boss'?'BOSS 直聘当前页面':job.source==='boss-chat'?'BOSS 聊天岗位':'本机模拟页面'} · 导入后保留岗位快照</p>`:''}${review}<div class="section-heading"><h3>BOSS 沟通</h3><button class="text-button" data-open-boss-connections>管理连接</button></div>${connections.length?`<p class="field-help">只显示当前绑定会话的消息。${connections.some(c=>c.capture_mode==='snapshot')?'当前为页面快照，每次替换旧快照；草稿需回扩展核对并点击填入。':''}${connections.some(c=>c.status==='syncing')?'扩展正在同步。':'当前离线，请在扩展开始同步。'}</p><div class="boss-message-list">${messages.map(m=>`<article class="boss-message ${m.role==='me'?'mine':''}"><small>${m.role==='me'?'我':'招聘方'}${m.snapshot?' · 当前可见快照':m.baseline?' · 历史基线':''}</small><p>${esc(m.text)}</p></article>`).join('')||'<p class="muted">当前会话暂无可见消息。</p>'}</div><form id="boss-draft-form"><label>填入哪个已绑定连接<select name="connection_id">${connections.map(c=>`<option value="${c.id}">${esc(c.label)} · ${labels[c.status]}</option>`).join('')}</select></label><label>沟通草稿<textarea id="boss-draft-text" name="text" rows="4" required maxlength="3000" placeholder="写下你准备回复招聘方的内容。确认后只填入BOSS输入框。">${esc(drafts.get(job.id)||'')}</textarea></label><div class="actions"><button class="secondary" type="submit">保存待确认草稿</button><button type="button" class="text-button" data-boss-greeting ${job.report?'':'disabled'}>用简历证据生成开场草稿</button></div></form>`:'<div class="notice">在扩展中使用“求职聊天快照配置”，核对并绑定当前会话，可同步可见消息。草稿需先在此确认，再回扩展核对当前会话并点击填入。刷新或切换会话后重新绑定。</div>'}${actions.map(a=>`<article class="boss-action"><span class="badge">${actionLabels[a.state]}</span><p>${esc(a.text)}</p>${a.state==='DRAFT'?`<button class="primary" data-boss-approve="${a.id}">${a.capture_mode==='snapshot'?'确认草稿，再到扩展填入':'确认并填入 BOSS 输入框'}</button>`:''}${['UNKNOWN','FILLING','FILLED'].includes(a.state)?`<button class="secondary" data-boss-resolve="${a.id}">${a.state==='FILLED'?'我已在 BOSS 核对草稿状态':'我已检查 BOSS 输入框，结束此动作'}</button>`:''}</article>`).join('')}<p class="field-help">填入输入框不表示已发送或已投递。聊天草稿请在平台核对后自行发送；已确认投递批次会按明确平台回执同步进度。</p>`;
   }
   window.renderBossPanel=function(job){signature='';jobPanel(job);};
   async function load(){
@@ -29,6 +29,18 @@
     try{const result=await api('/api/boss'),next=JSON.stringify(result);data=result;renderConnections();
       const editing=document.activeElement?.matches('input,textarea,select');
       if(!editing&&result.job_ids?.some(id=>!state.jobs.some(j=>j.id===id)))await refresh();
+      else if(!editing&&state.jobs.some(j=>['pending','waiting_jd'].includes(j.auto_match_state))){
+        const latest=await api('/api/overview');
+        const changed=latest.jobs.filter(j=>{const previous=state.jobs.find(item=>item.id===j.id);return previous&&(previous.auto_match_state!==j.auto_match_state||previous.report?.created_at!==j.report?.created_at);});
+        if(changed.length&&!document.activeElement?.matches('input,textarea,select')){
+          state.jobs=latest.jobs;renderList();
+          if(changed.some(j=>j.id===selected)){
+            const form=$('#tracking-form'),draft=form?new FormData(form):null;
+            renderDetail();
+            if(draft)for(const [name,value] of draft)$('#tracking-form').elements[name].value=value;
+          }
+        }
+      }
       if(next!==signature){jobPanel(state.jobs.find(j=>j.id===selected));if(!$('#boss-job-panel')?.contains(document.activeElement)||!document.activeElement.matches('input,textarea,select'))signature=next;}}
     finally{loading=false;}
   }
@@ -38,10 +50,10 @@
     if(button.id==='boss-modal-close'){$('#boss-modal').close();return;}
     if(button.id==='boss-open'){
       if(!$('#jobs-view').classList.contains('hidden')){
+        const form=$('#search-preferences-form');
         const link=$('#search-plan-links a');
-        if(link){link.click();return;}
-        if($('#search-preferences-form').elements.titles.value.trim()){
-          const form=$('#search-preferences-form');
+        if(link&&!form.dataset.edited){link.click();return;}
+        if(form.dataset.edited||form.elements.titles.value.trim()){
           form.requestSubmit(form.querySelector('[value="search"]'));return;
         }
       }
@@ -70,7 +82,7 @@
         const lines=form.requirements.split('\n').map(s=>s.trim()).filter(Boolean);
         if(!lines.length||lines.length>8)throw Error('请填写1至8条要求');
         const requirements=lines.map((line,i)=>{const parts=line.split('|').map(s=>s.trim());const weight=Number(parts[2]);if(parts.length!==3||!Number.isInteger(weight)||weight<1||weight>5)throw Error('每行应为：要求 | 关键词 | 权重1–5');return {id:'R'+(i+1),text:parts[0],keywords:parts[1].split(/[,，、]/).map(k=>k.trim()).filter(Boolean),weight};});
-        await api('/api/jobs/'+selected+'/requirements','PUT',{requirements});await refresh();toast('岗位要求已确认，可以开始匹配');
+        await api('/api/jobs/'+selected+'/requirements','PUT',{requirements});await refresh();toast('岗位要求已保存');
       }
     }catch(error){modalError(error);}finally{if(button.isConnected)button.disabled=false;}})();
   });

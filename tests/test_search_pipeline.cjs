@@ -135,3 +135,22 @@ test('unknown receipt stops remaining targets without automatic retry',async()=>
   assert.equal(h.navigations.length,1);assert.equal(h.calls.filter(c=>c.type==='PIPE_SEND_RESUME').length,1);
   assert.match(h.status(),/平台结果需要人工核对/);
 });
+
+test('authorized screening sends only matched IDs to greeting batches',async()=>{
+  const h=harness({api(type,data){
+    if(type==='COLLECT'){
+      const id=data.jobs[0].external_id;
+      return {opportunities:[{id,screening:{result:id==='shared'?'review':'matched'}}]};
+    }
+    if(type==='AUTO_DRAFTS')return {auto_greeting:true,eligible:2,batches:['batch']};
+    if(type==='APPLICATIONS')return {batches:[{id:'batch',mode:'greeting',account_label:'本人账号'}],items:[]};
+  }});
+  h.settings.auto_greeting_account='本人账号';
+  h.settings.resume_revision=5;
+  await h.run('#search-jobs');
+  const prepared=h.calls.find(c=>c.type==='AUTO_DRAFTS');
+  assert.deepEqual(Array.from(prepared.data.opportunity_ids),['one','two']);
+  assert.equal(prepared.data.mode,'greeting');
+  assert.equal(prepared.data.resume_label,'');
+  assert.equal(h.calls.filter(c=>c.type==='APP_DISPATCH').length,1);
+});

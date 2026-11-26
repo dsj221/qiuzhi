@@ -8,6 +8,7 @@ from typing import List, Literal, Optional
 from fastapi import Depends, Request
 from pydantic import BaseModel, Field
 
+from .model import INTENT_VERSION
 from .opportunities import DiscoveredJob, canonical, validate_search_url
 from .privacy import redact
 from .service import require
@@ -18,13 +19,20 @@ def delivered(evidence, label):
     return bool(label and label in evidence and re.search(r'已发送|发送成功|发送给', remainder) and not re.search(r'未发送|发送失败|尚未发送|没有发送|请求|申请|等待.*同意', remainder))
 
 
+GREETING_TEMPLATE = '您好，我关注到贵公司的“{岗位}”岗位，希望进一步了解岗位职责。'
+
+
+class GreetingRule(BaseModel):
+    account_label: str = Field(max_length=160)
+
+
 class BatchInput(BaseModel):
     opportunity_ids: List[str] = Field(min_length=1, max_length=10)
     connection_id: str
     account_label: str = Field(min_length=1, max_length=160)
     mode: Literal['greeting', 'resume'] = 'resume'
     resume_label: str = Field(default='', max_length=160)
-    message_template: str = Field(default='您好，我关注到贵公司的“{岗位}”岗位，希望进一步了解岗位职责。', min_length=4, max_length=3000)
+    message_template: str = Field(default=GREETING_TEMPLATE, min_length=4, max_length=3000)
 
 
 class AutomaticDraftInput(BaseModel):
@@ -34,7 +42,7 @@ class AutomaticDraftInput(BaseModel):
     account_label: str = Field(min_length=1, max_length=160)
     mode: Literal['greeting', 'resume']
     resume_label: str = Field(default='', max_length=160)
-    message_template: str = Field(default='您好，我关注到贵公司的“{岗位}”岗位，希望进一步了解岗位职责。', min_length=4, max_length=3000)
+    message_template: str = Field(default=GREETING_TEMPLATE, min_length=4, max_length=3000)
 
 
 class ApprovalInput(BaseModel):
@@ -79,7 +87,7 @@ class Applications:
         self.service, self.connector, self.opportunities = service, connector, opportunities
         with service.store.transaction() as db:
             for batch in db.all('application_batch'):
-                if batch['state'] in {'DRAFT', 'APPROVED', 'RUNNING'} and batch.get('matching_version') != 'api-v2':
+                if batch['state'] in {'DRAFT', 'APPROVED', 'RUNNING'} and batch.get('matching_version') != INTENT_VERSION:
                     batch['state'] = 'NEEDS_REVIEW'
                     db.put('application_batch', batch)
                     for pending in db.all('application_item'):
@@ -105,9 +113,17 @@ class Applications:
         with self.service.store.transaction() as db:
             return self.create_in(db, data)
 
+    def set_greeting_rule(self, key, account_label):
+        with self.service.store.transaction() as db:
+            connection = self.service.entity(db, 'boss_connection', key)
+            require(not connection['revoked'], '连接已撤销')
+            connection['auto_greeting_account'] = account_label.strip()
+            db.put('boss_connection', connection)
+            return {'account_label': connection['auto_greeting_account']}
+
     def prepare_automatic(self, key, token, request):
         with self.service.store.transaction() as db:
-            self.connector.authenticate(db, key, token)
+            connection = self.connector.authenticate(db, key, token)
             profile = db.get('profile', 'me')
             require(profile and profile['revision'] == request.resume_revision and
                     self.opportunities.preferences(db)['revision'] == request.preferences_revision,
@@ -122,12 +138,19 @@ class Applications:
                 identity = ('boss', op['external_id'])
                 if identity not in prior and saved.get(identity, 'saved') == 'saved':
                     eligible.append(oid)
+            direct = (request.mode == 'greeting' and request.account_label == connection.get('auto_greeting_account')
+                      and request.message_template == GREETING_TEMPLATE and not request.resume_label.strip())
             batches = []
             options = request.model_dump(exclude={'opportunity_ids', 'preferences_revision', 'resume_revision'})
             for start in range(0, len(eligible), 10):
                 data = dict(options, connection_id=key, opportunity_ids=eligible[start:start+10], automatic=True)
-                batches.append(self.create_in(db, data)['batch']['id'])
-            return {'batches': batches, 'eligible': len(eligible)}
+                prepared = self.create_in(db, data)
+                batch = prepared['batch']
+                if direct:
+                    batch['auto_greeting'] = True
+                    self.activate(db, batch, prepared['items'], profile)
+                batches.append(batch['id'])
+            return {'batches': batches, 'eligible': len(eligible), 'auto_greeting': direct}
 
     def create_in(self, db, data):
         require(len(set(data['opportunity_ids'])) == len(data['opportunity_ids']), '同一岗位不能重复加入批次', 422)
@@ -138,13 +161,13 @@ class Applications:
         require(profile is not None, '请先保存我的简历')
         prefs = self.opportunities.preferences(db)
         batch_id = uuid.uuid4().hex
-        batch = {'id': batch_id, **data, 'matching_version': 'api-v2', 'state': 'DRAFT', 'resume_revision': profile['revision'],
+        batch = {'id': batch_id, **data, 'matching_version': INTENT_VERSION, 'state': 'DRAFT', 'resume_revision': profile['revision'],
                  'preferences_revision': prefs['revision'], 'created_at': time.time()}
         items = []
         for key in data['opportunity_ids']:
             opportunity = self.service.entity(db, 'opportunity', key)
             require(opportunity['connection_id'] == connection['id'], '所选岗位来自不同连接，请分批处理')
-            require(opportunity.get('matching_version') == 'api-v2' and
+            require(opportunity.get('matching_version') == INTENT_VERSION and
                     (opportunity['screening'].get('report') or {}).get('engine') == 'model', '请使用匹配 API 重新筛选岗位')
             require(not opportunity.get('jd_outdated'), '岗位JD已更新，请重新采集并筛选')
             require(opportunity['screening']['result'] == 'matched', '只允许将符合已设筛选条件的岗位加入自动投递')
@@ -168,6 +191,9 @@ class Applications:
         profile = db.get('profile', 'me')
         prefs = self.opportunities.preferences(db)
         require(profile and profile['revision'] == batch['resume_revision'] and prefs['revision'] == batch['preferences_revision'], '简历或筛选条件已变化，请重新准备并确认批次')
+        if batch.get('auto_greeting'):
+            connection = self.service.entity(db, 'boss_connection', batch['connection_id'])
+            require(connection.get('auto_greeting_account') == batch['account_label'], '该账号的自动打招呼已关闭')
         return profile
 
     def approve(self, key, data):
@@ -178,14 +204,17 @@ class Applications:
             profile = self.current(db, batch)
             items = [i for i in db.all('application_item') if i['batch_id'] == key]
             require(secrets.compare_digest(batch['digest'], data['digest']) and batch['digest'] == self.manifest(batch, items), '批次内容发生变化，请重新核对')
-            if any(i['source'] == 'boss' for i in items):
-                require(not profile.get('is_demo') and profile.get('name') != '演示求职者', '演示简历不能用于真实投递，请保存本人真实简历')
-            batch.update(state='APPROVED', approved_at=time.time(), expires_at=time.time() + 15 * 60)
-            db.put('application_batch', batch)
-            for item in items:
-                item['state'] = 'PENDING'
-                db.put('application_item', item)
+            self.activate(db, batch, items, profile)
             return {'ok': True}
+
+    def activate(self, db, batch, items, profile):
+        if any(i['source'] == 'boss' for i in items):
+            require(not profile.get('is_demo') and profile.get('name') != '演示求职者', '演示简历不能用于真实投递，请保存本人真实简历')
+        batch.update(state='APPROVED', approved_at=time.time(), expires_at=time.time() + 15 * 60)
+        db.put('application_batch', batch)
+        for item in items:
+            item['state'] = 'PENDING'
+            db.put('application_item', item)
 
     def cancel(self, key):
         with self.service.store.transaction() as db:
@@ -377,6 +406,10 @@ def mount_applications(app, service, connector, opportunities, admin):
     applications = Applications(service, connector, opportunities)
     app.state.applications = applications
     token = lambda request: request.headers.get('authorization', '').removeprefix('Bearer ')
+
+    @app.put('/api/boss/connections/{key}/auto-greeting', dependencies=[Depends(admin)])
+    def greeting_rule(key: str, data: GreetingRule):
+        return applications.set_greeting_rule(key, data.account_label)
 
     @app.get('/api/applications', dependencies=[Depends(admin)])
     def summary():

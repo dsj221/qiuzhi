@@ -4,7 +4,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from job_agent.model import Model
+from job_agent.model import Model, original_quote
 
 
 RESUME = '本人手机：13812348888\n邮箱：private@example.test\n项目经历：使用 Python 和 FastAPI 开发报名服务，负责接口设计和测试，使用 SQLite 保存报名记录。'
@@ -155,6 +155,13 @@ def test_invalid_model_evidence_is_not_accepted():
     result=model.assess([JOB['requirements'][0]],[{'id':'resume','text':'维护活动页面'}])
     assert result['rows'][0]['status']=='unknown'
     assert result['score'] is None
+
+
+def test_quote_preserves_original_boss_typography_and_wording():
+    source = '岗位职 责：AIGC内容⽣产： 熟练运⽤主流AIGC⼯具进行视频创作。'
+    assert original_quote('岗位职责：', source) == '岗位职 责：'
+    assert original_quote('熟练运用主流AIGC工具', source) == '熟练运⽤主流AIGC⼯具'
+    assert not original_quote('精通主流AIGC工具', source)
 
 
 def test_database_survives_restart(client):

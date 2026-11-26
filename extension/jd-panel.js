@@ -25,7 +25,7 @@ async function fetchJobJD(jobId,automatic=false){
     if($('#job').value!==jobId)throw Error('所选岗位已变化，请重新获取JD');
     const result=await api('UPDATE_JOB_JD',{...details,confirmed:true},jobId);
     await jobs(jobId);
-    $('#jd-status').textContent=result.changed?'完整 JD 已保存，请回工作台校对岗位要求后重新匹配。':'JD 已是最新内容，已保留现有要求和匹配结果。';
+    $('#jd-status').textContent=result.changed?'完整 JD 已保存，可在工作台查看匹配进度。':'JD 已是最新内容，已保留现有要求和匹配结果。';
   }catch(error){$('#jd-status').textContent='JD 获取未完成：'+error.message+'。可打开对应岗位完整详情后点击重试。';}
   finally{jdBusy=false;$('#fetch-job-jd').disabled=false;}
 }

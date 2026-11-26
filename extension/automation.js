@@ -203,10 +203,10 @@ window.startJobAutomation=function(engine){
       const {counts}=await engine.search(operation,settings,tab.id,config.account);
       current(token);engine.check(operation);
       const result=await api('AUTO_DRAFTS',{opportunity_ids:counts.ids,preferences_revision:settings.preferences.revision,
-        resume_revision:settings.resume_revision,account_label:config.account,mode:config.mode,resume_label:config.resume});
+        resume_revision:settings.resume_revision,account_label:config.account,mode:config.mode,resume_label:config.mode==='resume'?config.resume:''});
       current(token);
       config.lastSearch=key;await chrome.storage.local.set({jobAutomation:config});
-      const message='搜索完成，读取 '+counts.read+' 个岗位，符合 '+counts.matched+' 个，待核对 '+counts.review+' 个，生成 '+result.batches.length+' 个待确认批次。';
+      const message='搜索完成，读取 '+counts.read+' 个岗位，符合 '+counts.matched+' 个，待核对 '+counts.review+' 个，生成 '+result.batches.length+(result.auto_greeting?' 个自动招呼批次。':' 个待确认批次。');
       step('batch',message);report(message);engine.status(message);
       try{lastImport=(await page('PIPE_CURRENT',{},tab.id)).job.external_id;}catch{}
     });
@@ -234,7 +234,7 @@ window.startJobAutomation=function(engine){
         step('profile','已诊断 '+structure.path.split('/').slice(0,3).join('/'));
         diagnosed=locationKey;
       }
-      if(!unreadable||unreadable.key!==locationKey||now>=unreadable.until){
+      if(!(route.pathname==='/web/geek/chat'&&engine.monitoringChat?.(tab.id))&&(!unreadable||unreadable.key!==locationKey||now>=unreadable.until)){
         try{
           if(await importVisible(tab,token)==='draft')return;
           unreadable=null;

@@ -65,15 +65,21 @@
     }
     selectChat(action){
       this.check(action);
-      try{this.chatTarget(action);return {selected:true};}catch(error){if(/账号|验证|后台/.test(error.message))throw error;}
+      let current=false;
+      try{this.chatTarget(action);current=true;}catch(error){if(/账号|验证|后台/.test(error.message))throw error;}
+      if(action.follow_target){
+        const dialog=this.profile.resumeDialogSelector||'dialog,[role="dialog"],.dialog-wrap,.dialog-container';
+        if([...this.doc.querySelectorAll(dialog)].some(el=>this.visible(el))||this.directPrompt())throw Error('当前有打开的弹窗，请先处理');
+      }
+      if(current&&(!action.follow_target||this.doc.location.hostname!=='www.zhipin.com'))return {selected:true};
       const input=this.doc.querySelector(this.profile.inputSelector||'#chat-input');
-      if(input&&this.visible(input)&&(input.isContentEditable?this.text(input):input.value))throw Error('当前会话有人工草稿，请先自行处理后再切换');
+      if(!current&&input&&this.visible(input)&&(input.isContentEditable?this.text(input):input.value))throw Error('当前会话有人工草稿，请先自行处理后再切换');
       const list=this.unique(this.profile.chatListSelector||'.user-list-content');
       const normalize=value=>value.replace(/\s+/g,'').toLocaleLowerCase();
       const candidates=[...list.querySelectorAll('span,div,p,a')].filter(el=>this.visible(el)&&normalize(this.text(el))===normalize(action.company));
       const labels=candidates.filter(el=>!candidates.some(other=>other!==el&&el.contains(other)));
       if(labels.length!==1)throw Error(labels.length?'同公司有多个联系人，请手动选择对应岗位的会话':'当前联系人列表尚未找到目标公司，请在BOSS搜索并选择该会话');
-      this.activate(labels[0]);return {selected:true};
+      if(!current)this.activate(labels[0]);return {selected:true};
     }
     chatTarget(action,passive=false){
       if(passive){this.guard();if(this.doc.hidden||this.accountLabel()!==action.account_label)throw Error('当前账号或前台页面不符');}
@@ -83,17 +89,73 @@
       const person=this.text(this.unique(p.viewConversationSelector||'.chat-conversation .user-info'));
       const normalize=value=>value.replace(/\s+/g,'').toLocaleLowerCase();
       if(normalize(position.split('\n')[0])!==normalize(action.title)||!person.split('\n').some(line=>normalize(line)===normalize(action.company)))throw Error('当前聊天的岗位或公司与已确认目标不一致');
+      if(action.contact&&person!==action.contact)throw Error('招聘方身份已变化');
       const receipts=this.receipts(),outgoing=receipts.filter(m=>m.outgoing&&m.text.trim());
       return {verified:true,account_label:this.accountLabel(),message_ids:receipts.map(m=>m.id),outgoing:outgoing.map(m=>({id:m.id,text:m.text}))};
     }
+    diagnoseResume(label){
+      this.guard();
+      if(!label||this.doc.hidden)throw Error('请填入完整文件名并打开 BOSS 附件选择窗口');
+      const matches=[...this.doc.querySelectorAll('dialog,[role="dialog"],.dialog-container,.dialog-wrap,.boss-dialog')].filter(el=>this.visible(el)&&this.text(el).includes(label));
+      const dialogs=matches.filter(el=>!matches.some(other=>other!==el&&el.contains(other)));
+      if(dialogs.length!==1)throw Error('未识别唯一附件选择窗口，请手动打开后重新诊断');
+      const dialog=dialogs[0];
+      const options=[...dialog.querySelectorAll('label,li,button,[role="option"],[role="radio"],[title],span,div')].filter(el=>this.visible(el)&&(this.text(el)===label||el.getAttribute('title')===label));
+      const leaves=options.filter(el=>!options.some(other=>other!==el&&el.contains(other)));
+      const buttons=[...dialog.querySelectorAll('button,[role="button"],a.btn')].filter(el=>this.visible(el)&&/^(确认发送|发送简历|发送|确定|确认)$/.test(this.text(el)));
+      if(leaves.length!==1||buttons.length!==1||leaves[0].contains(buttons[0])||buttons[0].contains(leaves[0]))
+        throw Error('需要唯一的指定文件和独立的发送确认按钮，请检查附件选择窗口');
+      const selector=el=>el.id?'#'+CSS.escape(el.id):el.tagName.toLowerCase()+[...el.classList].filter(c=>!['active','selected','disabled'].includes(c)).map(c=>'.'+CSS.escape(c)).join('');
+      const selectors={resumeDialogSelector:selector(dialog),resumeOptionSelector:selector(leaves[0]),resumeSendSelector:selector(buttons[0])};
+      if(this.unique(selectors.resumeDialogSelector)!==dialog||this.unique(selectors.resumeSendSelector,dialog)!==buttons[0])throw Error('选择窗口不能唯一定位，请在适配配置中校对选择器');
+      return {...selectors,resumeChooserVerified:true,resumeConfirmationText:this.text(buttons[0])};
+    }
+    followRead(action){
+      this.chatTarget({...action,contact:null});
+      const p=this.profile,container=this.unique(p.messagesContainer);
+      const nodes=[...container.querySelectorAll(p.messageSelector)].filter(el=>this.visible(el)).slice(-500);
+      const messages=nodes.map(el=>{
+        const id=el.getAttribute(p.receiptIdAttribute||'data-mid');
+        const mine=el.matches(p.outgoingSelector),incoming=el.matches(p.incomingSelector);
+        if(!id||mine===incoming)throw Error('消息编号或方向不明确，已停止跟进');
+        const body=incoming?el.querySelector(p.messageTextSelector):null;
+        return {id,role:mine?'me':'recruiter',text:body?this.text(body).slice(0,300):''};
+      });
+      if(!messages.length)throw Error('尚无可核对的聊天记录');
+      const contact=this.text(this.unique(p.viewConversationSelector));
+      const resume_seen=this.receipts().some(m=>m.outgoing&&/简历/.test(m.text)&&/请求|申请|已发送|发送成功|发送给/.test(m.text)&&!/失败|未发送/.test(m.text));
+      const delivery=this.verify({...action,mode:'resume',direct_resume:!action.resume_label},[]);
+      return {contact,messages,resume_seen:resume_seen||delivery?.outcome==='RESUME_SENT'||delivery?.outcome==='RESUME_REQUESTED',delivered_id:delivery?.outcome==='RESUME_SENT'?delivery.receipt_key:'',
+        delivered_evidence:delivery?.outcome==='RESUME_SENT'?delivery.evidence.slice(0,6000):''};
+    }
+    followGuard(action){
+      if(!action.trigger)return;
+      const state=this.followRead(action);
+      if(state.contact!==action.contact||state.messages.at(-1).id!==(action.reply_id||action.trigger))
+        throw Error('当前招聘方或最新消息已变化，请核对聊天');
+      if(action.reply_id&&state.resume_seen)throw Error('已发现简历发送记录，请核对附件状态');
+      if(action.reply_id){
+        const input=this.unique(this.profile.inputSelector);
+        if((input.isContentEditable?this.text(input):input.value)?.trim())throw Error('当前会话有人工草稿，请先处理');
+      }
+    }
     receipts(){
       const p=this.profile,selector=p.receiptMessagesSelector||'.chat-record .im-list > [data-mid]',attr=p.receiptIdAttribute||'data-mid';
-      return [...this.doc.querySelectorAll(selector)].filter(el=>this.visible(el)).slice(-500).map(el=>({id:el.getAttribute(attr),text:this.text(el),outgoing:el.matches(p.outgoingSelector||'.item-myself')})).filter(m=>m.id);
+      return [...this.doc.querySelectorAll(selector)].filter(el=>this.visible(el)).slice(-500).map(el=>({id:el.getAttribute(attr),text:this.text(el),outgoing:el.matches(p.outgoingSelector||'.item-myself'),
+        file:this.attachmentName(el)})).filter(m=>m.id);
+    }
+    attachmentName(row){
+      if(/请求|申请|等待|待确认|待接收|未发送|失败|撤回/.test(this.text(row)))return '';
+      const card=row.querySelector('.resume-card,.attachment-card,.file-card,[data-type="resume"],a[download]');
+      if(!card)return '';
+      return [card.getAttribute('download')||'',card.getAttribute('title')||'',...this.text(card).split('\n')]
+        .map(s=>s.trim()).find(s=>/^[^/\\<>\r\n]{1,156}\.(?:pdf|docx?)$/i.test(s))||'';
     }
     prepareGreeting(action){
+      this.followGuard(action);
       this.chatTarget(action);const el=this.unique(this.profile.inputSelector||'#chat-input');
       const editable=el.isContentEditable||el.getAttribute('contenteditable')==='true';const value=editable?this.text(el):el.value;
-      if(value&&value!==action.message)throw Error('输入框存在人工草稿，已保留原文');
+      if(value&&(action.trigger||value!==action.message))throw Error('输入框存在人工草稿，已保留原文');
       if(editable)el.textContent=action.message;
       else{const proto=el.tagName==='TEXTAREA'?this.doc.defaultView.HTMLTextAreaElement.prototype:this.doc.defaultView.HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,action.message);}
       el.dispatchEvent(new this.doc.defaultView.Event('input',{bubbles:true}));
@@ -102,30 +164,81 @@
       return {prepared:true,message_ids:this.receipts().map(m=>m.id)};
     }
     sendGreeting(action){
+      this.followGuard(action);
       this.chatTarget(action);const el=this.unique(this.profile.inputSelector||'#chat-input');const value=el.isContentEditable||el.getAttribute('contenteditable')==='true'?this.text(el):el.value;
       if(this.greetingPending?.id!==action.id||this.greetingPending?.epoch!==this.epoch)throw Error('消息动作已停止，禁止发送');
       if(value!==action.message)throw Error('消息已被修改，禁止发送');
       this.activate(this.control('发送',this.unique(this.profile.editorContainer||'.chat-im.chat-editor')));return {clicked:true};
     }
+    directPrompt(){
+      // Match platform controls outside the conversation transcript. BOSS can use
+      // a floating popover without a dialog role. Bind both buttons to that popover.
+      const confirmButtons=this.controls('确定').filter(el=>!el.closest('.user-list-content,[contenteditable="true"]'));
+      const found=[];
+      for(const button of confirmButtons){
+        for(let box=button.parentElement;box&&box!==this.doc.body;box=box.parentElement){
+          if(box.querySelector('.chat-record,.user-list-content,[contenteditable="true"]'))break;
+          const text=this.text(box).replace(/\s+/g,'');
+          if(!/^确定向Boss发送简历吗[?？](?:Boss确认后[，,]该附件简历将直接发送至对方邮箱[。.]?)?取消确定$/i.test(text))continue;
+          if(this.controls('取消',box).length===1&&this.controls('确定',box).length===1)found.push({box,button});
+          break;
+        }
+      }
+      if(found.length>1)throw Error('有多个发简历确认框，请核对当前聊天');
+      return found[0];
+    }
     openResume(action){
+      this.followGuard(action);
       this.chatTarget(action);
+      if(action.direct_resume&&action.trigger&&!action.resume_label){
+        if(this.directPrompt())throw Error('已有手动打开的发简历确认框，请先处理');
+        this.directOpening=null;this.resumePending=null;
+        this.activate(this.control('发简历',this.unique(this.profile.resumeControlsContainer||'.chat-controls')));
+        this.directOpening={lease:action.lease,epoch:this.epoch};
+        return {opened:true};
+      }
       if(this.profile.resumeChooserVerified!==true)throw Error('简历选择器尚未完成现场诊断，本次暂停；不会点击可能直接发送附件的入口');
       this.activate(this.control('发简历',this.unique(this.profile.resumeControlsContainer||'.chat-controls')));return {opened:true};
     }
     prepareResume(action){
+      this.followGuard(action);
       this.chatTarget(action);
+      if(action.direct_resume&&action.trigger&&!action.resume_label){
+        if(!this.directOpening||this.directOpening.lease!==action.lease||this.directOpening.epoch!==this.epoch)throw Error('当前发送动作已变化');
+        const prompt=this.directPrompt();
+        if(!prompt)throw Error('等待发简历确认框');
+        this.resumePending={...prompt,lease:action.lease,epoch:this.epoch};
+        this.directOpening=null;
+        return {prepared:true,message_ids:this.receipts().map(m=>m.id)};
+      }
       if(this.profile.resumeChooserVerified!==true)throw Error('简历选择器未诊断');
       const p=this.profile,dialog=this.unique(p.resumeDialogSelector);
       const options=[...dialog.querySelectorAll(p.resumeOptionSelector)].filter(el=>this.visible(el)&&(this.text(el)===action.resume_label||el.getAttribute('title')===action.resume_label));
       if(options.length!==1)throw Error('未找到唯一的已确认简历名称，不会改发其他文件');
-      this.activate(options[0]);this.resumePending={actionId:action.id,dialog,option:options[0],epoch:this.epoch};
+      this.activate(options[0]);
+      for(const event of ['click','input','change']){
+        dialog.addEventListener(event,e=>{if(e.isTrusted)this.resumePending=null;},{capture:true,once:true});
+      }
+      this.resumePending={actionId:action.id,dialog,option:options[0],epoch:this.epoch};
       return {prepared:true,resume_label:action.resume_label,message_ids:this.receipts().map(m=>m.id)};
     }
     sendResume(action){
+      if(action.confirmation==='personal')throw Error('此附件由本人确认发送');
+      this.followGuard(action);
       this.chatTarget(action);const pending=this.resumePending;
+      if(action.direct_resume&&action.trigger&&!action.resume_label){
+        const prompt=this.directPrompt();
+        if(!prompt||!pending||pending.lease!==action.lease||pending.epoch!==this.epoch||
+            prompt.box!==pending.box||prompt.button!==pending.button)throw Error('发简历确认框已变化');
+        this.resumePending=null;
+        this.activate(prompt.button);
+        return {clicked:true};
+      }
       if(!pending||pending.actionId!==action.id||pending.epoch!==this.epoch||!pending.option.isConnected||!this.visible(pending.dialog))throw Error('简历选择界面已变化，禁止发送');
       if(this.text(pending.option)!==action.resume_label&&pending.option.getAttribute('title')!==action.resume_label)throw Error('简历名称已变化');
-      this.activate(this.unique(this.profile.resumeSendSelector,pending.dialog));this.resumePending=null;return {clicked:true};
+      const confirm=this.unique(this.profile.resumeSendSelector,pending.dialog);
+      if(this.profile.resumeConfirmationText&&this.text(confirm)!==this.profile.resumeConfirmationText)throw Error('附件确认按钮已变化');
+      this.activate(confirm);this.resumePending=null;return {clicked:true};
     }
     verify(action,baseline,passive=false){
       this.chatTarget(action,passive);const fresh=this.receipts().filter(m=>!baseline.includes(m.id));
@@ -137,7 +250,11 @@
         const message=fresh.find(m=>m.outgoing&&m.text.includes(action.message));
         return message?{outcome:'COMMUNICATING',receipt_key:message.id,evidence:message.text}:{outcome:'UNKNOWN'};
       }
-      const delivered=fresh.find(m=>{const remaining=m.text.replace(action.resume_label,'');return m.outgoing&&m.text.includes(action.resume_label)&&/已发送|发送成功|发送给/.test(remaining)&&!/未发送|发送失败|尚未发送|没有发送|请求|申请|等待.*同意/.test(remaining);});
+      if(action.direct_resume){
+        const confirmed=fresh.slice().reverse().find(m=>m.outgoing&&(m.file||/^(?:您|你|我)?(?:已成功发送|已发送)(?:了)?(?:一份)?(?:附件)?简历(?:给(?:对方|招聘方|HR|Boss))?[。！!]?$/i.test(m.text.trim())));
+        if(confirmed)return {outcome:'RESUME_SENT',receipt_key:confirmed.id,evidence:confirmed.file?'附件卡片：'+confirmed.file:confirmed.text};
+      }
+      const delivered=action.resume_label&&fresh.slice().reverse().find(m=>{const remaining=m.text.replace(action.resume_label,'');return m.outgoing&&m.text.includes(action.resume_label)&&/已发送|发送成功|发送给/.test(remaining)&&!/未发送|发送失败|尚未发送|没有发送|请求|申请|等待.*同意/.test(remaining);});
       if(delivered)return {outcome:'RESUME_SENT',receipt_key:delivered.id,evidence:delivered.text};
       const requested=fresh.find(m=>m.outgoing&&/请求|申请|对方同意/.test(m.text)&&/简历/.test(m.text));
       return requested?{outcome:'RESUME_REQUESTED',receipt_key:requested.id,evidence:requested.text}:{outcome:'UNKNOWN'};

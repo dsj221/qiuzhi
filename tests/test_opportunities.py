@@ -79,7 +79,7 @@ def test_accept_internship_other_city_and_manual_favorite(client):
 
 
 def test_required_keywords_and_excluded_company(client):
-    connection, headers = setup(client, required_keywords=['RAG'], excluded_companies=['研发团队'])
+    connection, headers = setup(client, required_keywords=['RAG'], require_all_keywords=True, excluded_companies=['研发团队'])
     value = collect(client, connection, headers, [job()]).json()['opportunities'][0]
     assert value['screening']['result'] == 'excluded'
     assert len(value['screening']['excluded_reasons']) == 2
@@ -242,12 +242,15 @@ def test_search_plan_without_preferences_or_with_old_preferences(client):
     assert data['preferences']['search_limit'] == 5 and data['search_plan']['entries']
 
 
-def test_nationwide_search_still_applies_precise_local_rules(client):
-    connection, headers = setup(client, cities=['未配置城市'], min_salary_k=None)
+def test_region_search_keeps_district_and_requires_explicit_nationwide(client):
+    connection, headers = setup(client, cities=['西安市'], districts=['雁塔区'], min_salary_k=None)
     plan = client.get('/api/opportunities').json()['search_plan']
-    assert plan['warnings'] and '100010000' in plan['entries'][0]['url']
-    value = collect(client, connection, headers, [job(city='上海')]).json()['opportunities'][0]
+    assert parse_qs(urlsplit(plan['entries'][0]['url']).query) == {
+        'city': ['101110100'], 'multiBusinessDistrict': ['610113'], 'query': ['Python']}
+    value = collect(client, connection, headers, [job(city='西安·未央区')]).json()['opportunities'][0]
     assert value['screening']['result'] == 'excluded'
+    assert client.put('/api/opportunities/preferences', json={'titles': ['Python'], 'cities': ['未配置城市']}).status_code == 422
+    assert client.get('/api/opportunities').json()['search_plan'] == plan
     client.put('/api/opportunities/preferences', json={'titles': ['Python'], 'cities': [], 'accept_other_cities': True})
     plan = client.get('/api/opportunities').json()['search_plan']
     assert plan['total'] == 1 and plan['warnings'] == [] and plan['entries'][0]['city'] == '全国'
@@ -309,3 +312,33 @@ def test_changed_search_source_invalidates_batch_digest(client):
         db.put('application_item', item)
     assert approve(client, prepared).status_code == 409
 
+
+
+@pytest.mark.parametrize('mode,account,automatic', [
+    ('greeting', '本人', True), ('greeting', '其他账号', False), ('resume', '本人', False)])
+def test_post_screen_greeting_rule(client, monkeypatch, mode, account, automatic):
+    connection, headers = setup(client)
+    key = connection['connection_id']
+    rule = '/api/boss/connections/' + key + '/auto-greeting'
+    route = '/api/connector/' + key
+    assert client.put(rule, headers=headers, json={'account_label': '本人'}).status_code == 403
+    assert client.put(rule, json={'account_label': '本人'}).status_code == 200
+    monkeypatch.setattr(client.app.state.opportunities, 'screen', lambda *args: {
+        'result': 'matched', 'requirements': [], 'report': {'engine': 'model'}})
+    op = collect(client, connection, headers, [job()]).json()['opportunities'][0]
+    request = {'opportunity_ids': [op['id']], 'account_label': account, 'mode': mode,
+               'resume_label': '测试.pdf' if mode == 'resume' else '',
+               'preferences_revision': op['preferences_revision'], 'resume_revision': op['resume_revision']}
+    response = client.post(route + '/applications/drafts', headers=headers, json=request).json()
+    assert response['auto_greeting'] is automatic
+    batch = response['batches'][0]
+    assert client.post(route + '/applications/drafts', headers=headers, json=request).json()['eligible'] == 0
+    ready = client.get(route + '/applications', headers=headers).json()
+    if automatic:
+        assert [item['id'] for item in ready['batches']] == [batch]
+        assert ready['items'][0]['mode'] == 'greeting'
+        client.put(rule, json={'account_label': ''})
+        assert client.post(route + '/applications/' + batch + '/dispatch', headers=headers).status_code == 409
+    else:
+        assert not ready['batches']
+        assert [item['id'] for item in ready['drafts']] == [batch]

@@ -1,12 +1,14 @@
 """Personal resume, job evidence, and application lifecycle."""
+import logging
 import secrets
+import threading
 import time
 import uuid
 from pathlib import Path
 
 from fastapi import HTTPException
 
-from .model import Model
+from .model import MatchError, Model, ModelOutputError
 from .privacy import redact
 from .store import Store
 
@@ -23,6 +25,9 @@ class Service:
         directory.chmod(0o700)
         self.store = Store(directory / "job-agent.sqlite3")
         self.model = model or Model(directory)
+        self.match_wakeup = threading.Event()
+        self.match_stop = threading.Event()
+        self.assess_lock = threading.Lock()
         token = directory / "admin.token"
         if not token.exists():
             with token.open("x") as file:
@@ -35,10 +40,73 @@ class Service:
         require(value is not None, "记录不存在", 404)
         return value
 
+    @staticmethod
+    def auto_state(job, profile, enabled):
+        if job.get("source") not in {"boss", "boss-chat"} or job.get("report"):
+            return None
+        if job.get("source") == "boss-chat" and not job.get("jd_fetched_at") and job.get("requirements_need_review"):
+            return "waiting_jd"
+        if not job.get("description", "").strip() and not job.get("requirements"):
+            return "waiting_jd"
+        if job["status"] == "closed":
+            return None
+        if not profile or profile.get("is_demo"):
+            return "waiting_resume"
+        if not enabled:
+            return "waiting_key"
+        return "failed" if job.get("auto_match_error") else "pending"
+
     def overview(self):
         with self.store.transaction() as db:
-            return {"profile": db.get("profile", "me"), "jobs": db.all("job")[::-1],
+            profile = db.get("profile", "me")
+            jobs = db.all("job")[::-1]
+            for job in jobs:
+                job["auto_match_state"] = self.auto_state(job, profile, self.model.enabled)
+            return {"profile": profile, "jobs": jobs,
                     "model_enabled": self.model.enabled, "model_name": self.model.name}
+
+    def match_imports(self):
+        while not self.match_stop.is_set():
+            self.match_wakeup.clear()
+            try:
+                with self.store.transaction() as db:
+                    profile = db.get("profile", "me")
+                    pending = [j["id"] for j in reversed(db.all("job"))
+                               if self.auto_state(j, profile, self.model.enabled) == "pending"]
+                for key in pending:
+                    if self.match_stop.is_set():
+                        return
+                    with self.assess_lock:
+                        self.assess_import(key)
+            except Exception:
+                logging.getLogger(__name__).exception("自动匹配队列异常")
+            self.match_wakeup.wait(30)
+
+    def assess_import(self, key):
+        with self.store.transaction() as db:
+            job = db.get("job", key)
+            profile = db.get("profile", "me")
+            if not job or self.auto_state(job, profile, self.model.enabled) != "pending":
+                return
+        for attempt in range(2):
+            try:
+                self._assess(key)
+                return
+            except ModelOutputError as exc:
+                if not attempt:
+                    continue
+                message = str(exc)
+            except MatchError as exc:
+                message = str(exc)
+            except HTTPException as exc:
+                message = exc.detail
+            break
+        with self.store.transaction() as db:
+            current = db.get("job", key)
+            if (current and not current.get("report") and current.get("description") == job.get("description")
+                    and current["requirements"] == job["requirements"] and db.get("profile", "me") == profile):
+                current["auto_match_error"] = message
+                db.put("job", current)
 
     def save_profile(self, data):
         text = redact(data["text"])
@@ -51,12 +119,14 @@ class Service:
             db.put("profile", profile)
             # An old report must never look like a match for an edited resume.
             for job in db.all("job"):
+                job.pop("auto_match_error", None)
                 job["report"] = None
                 db.put("job", job)
             for batch in db.all('application_batch'):
                 if batch['state'] in {'DRAFT', 'APPROVED', 'RUNNING'}:
                     batch['state'] = 'NEEDS_REVIEW'
                     db.put('application_batch', batch)
+            self.match_wakeup.set()
             return profile
 
     def save_job(self, data):
@@ -67,20 +137,37 @@ class Service:
                                   "history": [{"status": "saved", "at": time.time()}]})
 
     def assess(self, key):
+        with self.assess_lock:
+            return self._assess(key)
+
+    def _assess(self, key):
         with self.store.transaction() as db:
             job = self.entity(db, "job", key)
-            require(not job.get("requirements_need_review"), "请先校对从 BOSS 导入的岗位要求和关键词")
+            from_jd = bool(job.get("requirements_need_review") or job.get("requirements_origin") == "literal-jd-skills")
+            require(not (from_jd and job.get("source") == "boss-chat" and not job.get("jd_fetched_at")),
+                    "等待导入完整的岗位正文")
+            require(not from_jd or job.get("description", "").strip(), "请先补充岗位正文，或手动确认岗位要求")
             profile = db.get("profile", "me")
             require(profile is not None, "请先保存我的简历")
             requirements_snapshot, description_snapshot = job["requirements"], job.get("description", "")
-        report = self.model.assess(job["requirements"], [{"id": "my-resume", "text": profile["text"]}])
+            needs_review = job.get("requirements_need_review")
+        sources = [{"id": "my-resume", "text": profile["text"]}]
+        if from_jd:
+            requirements, report = self.model.matching(None, sources, description=description_snapshot)
+            require(bool(requirements), "AI 未能从岗位正文识别要求，请补充完整 JD 后重试")
+        else:
+            report = self.model.assess(requirements_snapshot, sources)
         report.update(resume_revision=profile["revision"], created_at=time.time())
         with self.store.transaction() as db:
             current = db.get("profile", "me")
             require(current is not None and current["revision"] == profile["revision"], "简历已更新，请重新匹配")
             job = self.entity(db, "job", key)
-            require(job["requirements"] == requirements_snapshot and job.get("description", "") == description_snapshot,
+            require(job["requirements"] == requirements_snapshot and job.get("description", "") == description_snapshot
+                    and job.get("requirements_need_review") == needs_review,
                     "岗位JD或要求已更新，请校对后重新匹配")
+            if from_jd:
+                job.update(requirements=requirements, requirements_origin="model-jd", requirements_need_review=False)
+            job.pop("auto_match_error", None)
             job["report"] = report
             db.put("job", job)
         return report
@@ -128,7 +215,7 @@ class Service:
                     if batch:
                         batch['state'] = 'NEEDS_REVIEW'
                         db.put('application_batch', batch)
-            for kind in ("boss_message", "boss_action", "boss_snapshot"):
+            for kind in ("boss_message", "boss_action", "boss_snapshot", "follow_watch", "follow_notice"):
                 for record in db.all(kind):
                     if record["job_id"] == key:
                         db.delete(kind, record["id"])
@@ -150,6 +237,7 @@ class Service:
                     batch['state'] = 'NEEDS_REVIEW'
                     db.put('application_batch', batch)
             for job in db.all("job"):
+                job.pop("auto_match_error", None)
                 job["report"] = None
                 db.put("job", job)
             for opportunity in db.all('opportunity'):

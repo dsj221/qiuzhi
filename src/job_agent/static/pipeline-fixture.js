@@ -54,6 +54,23 @@
       rejects(()=>adapter.chatTarget({...action,company:'另外一家企业'}),'招聘方不符时停止');
       assert(adapter.salary('\uE111-\uE112K').salary_min_k===null,'字体混淆的薪资不猜测数值');
       const unverified=new JobPipelineAdapter(document,{...profile,resumeChooserVerified:false});rejects(()=>unverified.openResume(resume),'未诊断选择器不会触发附件入口');unverified.dispose();
+      q('#fixture-messages').replaceChildren();add('recruiter','可以发一份简历吗？');add('me','感谢回复');
+      const replyId=adapter.receipts().at(-1).id;
+      const direct={...action,direct_resume:true,resume_label:'',mode:'resume',lease:'fixture-direct',
+        contact:current.job.company,trigger:adapter.receipts()[0].id,reply_id:replyId};
+      const prompt=document.createElement('div');
+      prompt.innerHTML='<p>确定向 Boss 发送简历吗？</p><p>Boss确认后，该附件简历将直接发送至对方邮箱</p><button>取消</button><button>确定</button>';
+      const opener=q('#fixture-open-resume'),original=opener.onclick;
+      let clicks=0;
+      opener.onclick=()=>q('#fixture-resume-controls').append(prompt);
+      prompt.lastElementChild.onclick=()=>{clicks++;prompt.remove();add('me','已发送附件简历');};
+      try{
+        adapter.openResume(direct);prepared=adapter.prepareResume(direct);
+        assert(!clicks&&adapter.verify(direct,prepared.message_ids).outcome==='UNKNOWN','识别确认弹窗本身不算附件已发');
+        adapter.sendResume(direct);
+        assert(clicks===1&&adapter.verify(direct,prepared.message_ids).outcome==='RESUME_SENT','发简历 → 确定后核对聊天中的新发送回执');
+        rejects(()=>adapter.sendResume(direct),'相同确认动作不能重复发送');
+      }finally{prompt.remove();opener.onclick=original;}
       q('#fixture-blocked').hidden=false;rejects(()=>adapter.open(action),'出现验证提示立即停止');
       q('#fixture-tests').textContent=results.join('\n')+'\n筛选与投递自检全部通过。仅为本机模拟，不代表真实平台已发送。';
     }catch(error){q('#fixture-tests').textContent=results.join('\n')+'\n✗ '+error.message;}

@@ -11,6 +11,8 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import Depends, Request
 from pydantic import BaseModel, Field
 
+from .model import INTENT_VERSION, ModelOutputError
+from .privacy import redact
 from .service import require
 
 
@@ -23,8 +25,9 @@ class SearchPreferences(BaseModel):
     accept_other_cities: bool = False
     excluded_companies: List[str] = Field(default_factory=list, max_length=30)
     required_keywords: List[str] = Field(default_factory=list, max_length=15)
-    min_score: int = Field(default=50, ge=0, le=100)
-    min_coverage: float = Field(default=.5, ge=0, le=1)
+    require_all_keywords: bool = False
+    min_score: int = Field(default=60, ge=0, le=100)
+    min_coverage: float = Field(default=.35, ge=0, le=1)
     limit: int = Field(default=10, ge=1, le=20)
     search_limit: int = Field(default=5, ge=1, le=20)
     auto_favorite: bool = True
@@ -49,6 +52,33 @@ class CollectionInput(BaseModel):
 
 
 BOSS_REGIONS = json.loads((Path(__file__).parent / 'static' / 'boss-regions.json').read_text(encoding='utf-8'))
+
+def coverage_reason(report, minimum):
+    rows = report['rows']
+    if not rows:
+        return 'AI 未提取到可评估的岗位要求，本次无法计算简历覆盖率'
+    scored = sum(row.get('score') is not None for row in rows)
+    reason = f"{len(rows)} 项岗位要求中，{scored} 项有可评分的简历原文，证据覆盖率为 {report['coverage']:.0%}"
+    if minimum is not None and report['coverage'] < minimum:
+        reason += f"，低于本次设置的 {minimum:.0%}"
+    return reason
+
+
+def intent_criteria(prefs):
+    areas, _ = search_regions(prefs)
+    criteria = {'方向': [redact(t) for t in prefs['titles']]}
+    if areas and (not prefs['accept_other_cities'] or any(areas.values())):
+        criteria['工作地点'] = {'目标城市及区县': areas, '接受其他城市': prefs['accept_other_cities']}
+    if not prefs['accept_internship']:
+        criteria['岗位类型'] = '排除实习岗位，常规招聘可接受'
+    if prefs['min_salary_k'] is not None:
+        criteria['月薪下限'] = f"最低月薪至少 {prefs['min_salary_k']:g}K"
+    if prefs['excluded_companies']:
+        criteria['排除公司'] = {'避开以下公司': [redact(c) for c in prefs['excluded_companies']]}
+    if prefs['required_keywords']:
+        key = '必需关键词' if prefs.get('require_all_keywords') else '偏好关键词'
+        criteria[key] = [redact(k) for k in prefs['required_keywords']]
+    return criteria
 
 
 def search_regions(prefs):
@@ -140,62 +170,70 @@ class Opportunities:
 
     def screen(self, job, profile, prefs):
         excluded, pending, reasons = [], [], []
-        haystack = job['title'] + '\n' + job['description']
-        if not any(t.casefold() in job['title'].casefold() for t in prefs['titles']):
-            excluded.append('岗位名称不符合目标方向')
-        else:
-            reasons.append('岗位名称符合目标方向')
-        cities, region_errors = search_regions(prefs)
-        if region_errors:
-            pending.extend(region_errors)
-        elif cities or not prefs['accept_other_cities']:
-            location = re.split(r'[·•\s]+', job['city'].strip())
-            city = location[0].removesuffix('市')
-            if not city:
-                pending.append('工作城市尚未核验')
-            elif city not in cities and not prefs['accept_other_cities']:
-                excluded.append('不在意向城市范围')
-            elif cities.get(city) and len(location) < 2:
-                pending.append('工作区县尚未核验')
-            elif cities.get(city) and location[1] not in cities[city]:
-                excluded.append('不在所选工作区县')
-            else:
-                reasons.append('工作区县符合筛选条件' if cities.get(city) else '城市符合筛选条件')
-        if not prefs['accept_internship'] and '实习' in haystack:
-            excluded.append('已排除实习岗位')
-        if any(c.casefold() in job['company'].casefold() for c in prefs['excluded_companies']):
-            excluded.append('公司在排除清单中')
-        if prefs['min_salary_k'] is not None:
-            if job.get('salary_min_k') is None:
-                pending.append('薪资未能可靠读取，需核验')
-            elif job['salary_min_k'] < prefs['min_salary_k']:
-                excluded.append('薪资区间下限低于要求')
-            else:
-                reasons.append('月薪区间下限达到要求')
-        missing = [k for k in prefs['required_keywords'] if k.casefold() not in haystack.casefold()]
-        if missing:
-            excluded.append('岗位缺少必需关键词：' + '、'.join(missing))
         requirements, report = [], None
-        if len(job['description'].strip()) < 20:
-            pending.append('缺少完整岗位正文')
-        elif not profile:
-            pending.append('请先保存我的简历')
-        elif not excluded and not pending:
-            requirements, report = self.service.model.matching(
-                None, [{'id': 'my-resume', 'text': profile['text']}], description=job['description'])
-            if report['score'] is None or report['coverage'] < prefs['min_coverage']:
-                pending.append('API 匹配缺少可核对的简历证据')
-            elif report['score'] < prefs['min_score']:
-                excluded.append('API 匹配参考分低于筛选阈值')
+        intent = {}
+        if not job['description'].strip():
+            pending.append('缺少岗位正文，待补充后由 AI 识别')
+        else:
+            posting = {k: job.get(k) or '' for k in ('title', 'company', 'city', 'salary_text', 'description')}
+            low = job.get('salary_min_k')
+            if low is not None:
+                posting['verified_monthly_minimum'] = f'{low:g}K'
+            intent, mandatory_quotes = self.service.model.assess_intent(intent_criteria(prefs), posting)
+            for key, finding in intent.items():
+                detail = key + ' · ' + finding['reason']
+                if finding['quote']:
+                    detail += '（岗位原文：“' + finding['quote'] + '”）'
+                if key == '偏好关键词' or finding['status'] == 'met':
+                    reasons.append(detail)
+                elif finding['status'] == 'unmet':
+                    excluded.append(detail)
+                else:
+                    pending.append(detail)
+        if not excluded and not pending:
+            if not profile:
+                pending.append('请先保存我的简历')
             else:
-                reasons.append('API 匹配证据达到所设阈值')
+                try:
+                    requirements, report = self.service.model.matching(
+                        None, [{'id': 'my-resume', 'text': profile['text']}], description=job['description'],
+                        mandatory_quotes=mandatory_quotes)
+                except ModelOutputError as error:
+                    pending.append(str(error))
+        if report is not None:
+            evaluated = {req['text'] for req in requirements}
+            pending.extend('硬性资格尚未逐项核实：' + quote for quote in mandatory_quotes if quote not in evaluated)
+            score, cutoff = report['score'], prefs['min_score']
+            core_supported = False
+            for req, row in zip(requirements, report['rows']):
+                if req['priority'] == 'mandatory' and row['status'] != 'met':
+                    message = '硬性资格 · ' + req['text'] + '：' + row['reason']
+                    if row['status'] == 'unmet':
+                        excluded.append(message)
+                    else:
+                        pending.append(message)
+                if req['priority'] == 'core' and row['status'] in ('met', 'partial') and row['score'] is not None:
+                    core_supported = True
+            if score is None or report['coverage'] < prefs['min_coverage']:
+                pending.append(coverage_reason(report, prefs['min_coverage']))
+            elif score < max(0, cutoff - 15):
+                excluded.append(f'简历参考分 {score}，低于待核对区间下限 {cutoff - 15}')
+            elif score < cutoff:
+                pending.append(f'简历参考分 {score}，处于门槛 {cutoff} 以下的核对区间')
+            elif not core_supported:
+                pending.append('已有证据尚未支持核心要求')
+            else:
+                reasons.append('简历证据达到你设置的分数和覆盖率')
         return {'result': 'excluded' if excluded else 'review' if pending else 'matched', 'reasons': reasons,
-                'excluded_reasons': excluded, 'review_reasons': pending, 'requirements': requirements, 'report': report}
+                'excluded_reasons': excluded, 'review_reasons': pending, 'requirements': requirements,
+                'intent': intent, 'report': report}
 
     def favorite_in(self, db, value):
         existing = next((j for j in db.all('job') if j.get('source') == value['source'] and j.get('boss_external_id') == value['external_id']), None)
         if existing:
-            if existing.get('requirements_origin') in {'literal-jd-skills', 'model-jd'} and value['screening']['report']:
+            if (existing.get('requirements_origin') in {'literal-jd-skills', 'model-jd'}
+                    or (existing.get('requirements_need_review') and existing['description'] == value['description'])) and value['screening']['report']:
+                existing.pop('auto_match_error', None)
                 existing.update(requirements=value['screening']['requirements'], requirements_origin='model-jd',
                                 description=value['description'], requirements_need_review=False,
                                 report={**value['screening']['report'], 'resume_revision': value['resume_revision'],
@@ -228,8 +266,13 @@ class Opportunities:
         for job, source in zip(jobs, sources):
             if job.get('salary_min_k') is not None and job.get('salary_max_k') is not None:
                 require(job['salary_min_k'] <= job['salary_max_k'], '薪资范围无效', 422)
-            screened = self.screen(job, profile, prefs)
-            value = {**job, 'matching_version': 'api-v2', 'id': canonical([source, job['external_id']]), 'source': source, 'connection_id': key,
+            try:
+                screened = self.screen(job, profile, prefs)
+            except ModelOutputError as error:
+                screened = {'result': 'review', 'reasons': [], 'excluded_reasons': [],
+                            'review_reasons': [str(error)], 'requirements': [], 'report': None}
+            value = {**job, 'matching_version': INTENT_VERSION,
+                     'id': canonical([source, job['external_id']]), 'source': source, 'connection_id': key,
                      'content_hash': canonical(job), 'resume_revision': profile['revision'] if profile else None,
                      'search_url': search_url,
                      'preferences_revision': prefs['revision'], 'screening': screened, 'captured_at': time.time()}
@@ -259,7 +302,14 @@ class Opportunities:
             prefs = self.preferences(db)
             values = db.all('opportunity')[::-1]
             for value in values:
-                value['stale'] = value.get('matching_version') != 'api-v2' or bool(value.get('jd_outdated')) or value['resume_revision'] != (profile['revision'] if profile else None) or value['preferences_revision'] != prefs['revision']
+                value['stale'] = value.get('matching_version') != INTENT_VERSION or bool(value.get('jd_outdated')) or value['resume_revision'] != (profile['revision'] if profile else None) or value['preferences_revision'] != prefs['revision']
+                screen = value['screening']
+                if screen.get('report', {}) and 'rows' in screen['report']:
+                    minimum = prefs['min_coverage'] if value['preferences_revision'] == prefs['revision'] else None
+                    screen['review_reasons'] = [
+                        coverage_reason(screen['report'], minimum) if reason in
+                        {'AI 匹配缺少可核对的简历证据', 'API 匹配缺少可核对的简历证据'} else reason
+                        for reason in screen['review_reasons']]
             return {'preferences': prefs, 'search_plan': search_plan(prefs), 'opportunities': values, 'has_resume': bool(profile),
                     'demo_resume': bool(profile and (profile.get('is_demo') or profile.get('name') == '演示求职者'))}
 
@@ -284,12 +334,13 @@ def mount_opportunities(app, service, connector, admin):
     @app.get('/api/connector/{key}/search')
     def search_settings(key: str, request: Request):
         with service.store.transaction() as db:
-            connector.authenticate(db, key, request.headers.get('authorization', '').removeprefix('Bearer '))
+            connection = connector.authenticate(db, key, request.headers.get('authorization', '').removeprefix('Bearer '))
             prefs = opportunities.preferences(db)
             profile = db.get('profile', 'me')
             return {'preferences': prefs, 'search_plan': search_plan(prefs),
+                    'auto_greeting_account': connection.get('auto_greeting_account', ''),
                     'resume_revision': profile['revision'] if profile else None,
-                    'model_enabled': service.model.enabled, 'matching_version': 'api-v2/region-v1'}
+                    'model_enabled': service.model.enabled, 'matching_version': INTENT_VERSION}
 
     @app.post('/api/connector/{key}/opportunities')
     def collect(key: str, data: CollectionInput, request: Request):

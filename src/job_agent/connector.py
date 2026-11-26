@@ -198,6 +198,7 @@ class Connector:
                 job['source'] = 'boss'
             changed = job.get("description") != description
             if changed:
+                job.pop("auto_match_error", None)
                 job.update(description=description, requirements=jd_requirements(description), requirements_need_review=True, report=None)
                 affected_opportunities = set()
                 for opportunity in db.all("opportunity"):
@@ -404,7 +405,9 @@ def mount_connector(app, service, admin):
 
     @app.post("/api/connector/{key}/jobs")
     def import_job(key: str, data: PageJob, request: Request):
-        return connector.import_job(key, token(request), data.model_dump())
+        result = connector.import_job(key, token(request), data.model_dump())
+        service.match_wakeup.set()
+        return result
 
     @app.post("/api/connector/{key}/chat-job")
     def create_chat_job(key: str, data: ChatJobInput, request: Request):
@@ -412,7 +415,9 @@ def mount_connector(app, service, admin):
 
     @app.post("/api/connector/{key}/jobs/{job_id}/jd")
     def update_jd(key: str, job_id: str, data: PageJob, request: Request):
-        return connector.update_jd(key, token(request), job_id, data.model_dump())
+        result = connector.update_jd(key, token(request), job_id, data.model_dump())
+        service.match_wakeup.set()
+        return result
 
     @app.post("/api/connector/{key}/observations")
     def observe(key: str, data: Observation, request: Request):

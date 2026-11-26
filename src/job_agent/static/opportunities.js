@@ -13,7 +13,7 @@
     for(const name of ['titles','cities','districts','required_keywords','excluded_companies'])form.elements[name].value=(prefs[name]||[]).join(',');
     for(const name of ['min_salary_k','limit','search_limit','min_score'])form.elements[name].value=prefs[name]??'';
     form.elements.min_coverage.value=Math.round(prefs.min_coverage*100);
-    for(const name of ['accept_internship','accept_other_cities','auto_favorite'])form.elements[name].checked=prefs[name];
+    for(const name of ['require_all_keywords','accept_internship','accept_other_cities','auto_favorite'])form.elements[name].checked=prefs[name];
     q('#preferences-status').textContent=prefs.revision?'已保存条件版本 '+prefs.revision:'先保存筛选条件，再到BOSS扩展搜索并筛选';
     void fetch('/static/boss-regions.json').then(r=>r.json()).then(regions=>{
       const cities=form.elements.cities;
@@ -49,6 +49,34 @@
       const field=q('#application-batch-form').elements.account_label;if(!field.value)field.value=c.labels?.account||'';
     }catch{}
   }
+  function renderGreetingRule(){
+    const selected=connections.find(c=>c.id===q('#application-connection').value);
+    const account=selected?.auto_greeting_account;
+    q('#set-auto-greeting').textContent=account?'关闭筛选后自动打招呼':'开启筛选后自动打招呼';
+    q('#auto-greeting-state').textContent=account?'已为 '+account+' 开启，仅向符合条件的新岗位打招呼。':'使用上方连接和账号。BOSS 可能发送账号设置的默认招呼。';
+  }
+  q('#set-auto-greeting').addEventListener('click',()=>void act(async()=>{
+    const selected=connections.find(c=>c.id===q('#application-connection').value);
+    if(!selected||selected.revoked)throw Error('请选择当前使用的 BOSS 连接');
+    const account=q('#application-batch-form').elements.account_label.value.trim();
+    if(!selected.auto_greeting_account&&!account)throw Error('请填写 BOSS 当前显示账号');
+    const result=await api('/api/boss/connections/'+selected.id+'/auto-greeting','PUT',
+      {account_label:selected.auto_greeting_account?'':account});
+    selected.auto_greeting_account=result.account_label;renderGreetingRule();
+  }));
+  function evidenceDetails(opportunity, open){
+    const {report,requirements}=opportunity.screening;
+    if(report?.engine!=='model'||!report.rows?.length)return '';
+    const labels=new Map(requirements.map(r=>[r.id,r]));
+    const priorities={core:'核心要求',mandatory:'硬性资格',bonus:'加分项'};
+    const rows=report.rows.map(row=>{
+      const req=labels.get(row.requirement_id);
+      const status=[priorities[req?.priority],row.score!=null?'已计入覆盖率':'待核对'].filter(Boolean).join(' · ');
+      const reason=row.reason==='简历中没有可核对的原文证据'?'这次评估没有可核对的简历引文':row.reason;
+      return `<li><strong>${esc(req?.text||row.requirement_id)}</strong><p>${status} · ${esc(reason)}</p>${evidenceHTML(row.evidence||[])}</li>`;
+    });
+    return `<details data-resume-evidence="${esc(opportunity.id)}" ${open?'open':''}><summary>查看岗位要求与简历原文</summary><ul>${rows.join('')}</ul></details>`;
+  }
   function render(){
     if(!data)return;initialize();updateConnections();
     const plan=data.search_plan;
@@ -59,10 +87,12 @@
     q('#opportunity-stats').innerHTML=['matched','review','excluded'].map(k=>`<span>${resultLabels[k]}：<strong>${values.filter(v=>v.screening.result===k&&!v.stale).length}</strong></span>`).join('');
     for(const id of picked){if(!values.some(v=>v.id===id&&!v.stale&&v.screening.result==='matched'))picked.delete(id);}
     alignConnection();
+    renderGreetingRule();
     const visible=values.filter(v=>filter==='all'||v.screening.result===filter);
+    const expanded=new Set([...document.querySelectorAll('[data-resume-evidence][open]')].map(el=>el.dataset.resumeEvidence));
     q('#opportunity-results').innerHTML=visible.map(v=>{
       const screen=v.screening,report=screen.report,eligible=!v.stale&&screen.result==='matched';
-      return `<article class="opportunity-card"><header><label class="pick"><input type="checkbox" data-pick-opportunity="${v.id}" ${eligible?'':'disabled'} ${picked.has(v.id)?'checked':''} aria-label="选择${esc(v.title)} ${esc(v.company)}"><h3>${esc(v.title)}</h3></label><span class="badge ${eligible?'green':screen.result==='review'?'amber':''}">${v.stale?'匹配已过期':resultLabels[screen.result]}</span></header><p>${esc(v.company)} · ${esc(v.city||'城市待核验')}</p><p>${esc(v.salary_text||'薪资待核验')}${v.salary_min_k!=null?' · 月薪区间下限 '+v.salary_min_k+'K':''}</p><p>${report?(report.engine==='model'?'API 匹配 · ':'历史规则 · ')+'证据参考分 '+(report.score??'—')+' · 覆盖 '+Math.round(report.coverage*100)+'%':'尚未形成证据报告'}</p><ul>${[...screen.reasons,...screen.excluded_reasons,...screen.review_reasons].map(s=>`<li>${esc(s)}</li>`).join('')}</ul><div class="actions"><a href="${esc(v.url)}" target="_blank" rel="noopener noreferrer">查看原岗位 ↗</a>${v.favorite_id?'<span class="badge green">已加入收藏机会</span>':`<button class="secondary" data-favorite-opportunity="${v.id}">加入收藏机会</button>`}</div><p class="opportunity-source">${v.source==='fixture'?'本机演示岗位':'BOSS当前列表'} · ${v.screening.requirements.length}项岗位要求</p></article>`;
+      return `<article class="opportunity-card"><header><label class="pick"><input type="checkbox" data-pick-opportunity="${v.id}" ${eligible?'':'disabled'} ${picked.has(v.id)?'checked':''} aria-label="选择${esc(v.title)} ${esc(v.company)}"><h3>${esc(v.title)}</h3></label><span class="badge ${eligible?'green':screen.result==='review'?'amber':''}">${v.stale?'匹配已过期':resultLabels[screen.result]}</span></header><p>${esc(v.company)} · ${esc(v.city||'城市待核验')}</p><p>${esc(v.salary_text||'薪资待核验')}${v.salary_min_k!=null?' · 月薪区间下限 '+v.salary_min_k+'K':''}</p><p>${report?((screen.intent||report.intent)?'AI 意图匹配 · ':report.engine==='model'?'API 匹配 · ':'历史规则 · ')+'证据参考分 '+(report.score??'—')+' · 覆盖 '+Math.round(report.coverage*100)+'%':screen.intent&&Object.keys(screen.intent).length?'已评估岗位意图 · 暂无简历评分':'尚未形成证据报告'}</p><ul>${[...screen.reasons,...screen.excluded_reasons,...screen.review_reasons].map(s=>`<li>${esc(s)}</li>`).join('')}</ul>${evidenceDetails(v,expanded.has(v.id))}<div class="actions"><a href="${esc(v.url)}" target="_blank" rel="noopener noreferrer">查看原岗位 ↗</a>${v.favorite_id?'<span class="badge green">已加入收藏机会</span>':`<button class="secondary" data-favorite-opportunity="${v.id}">加入收藏机会</button>`}</div><p class="opportunity-source">${v.source==='fixture'?'本机演示岗位':'BOSS当前列表'} · ${v.screening.requirements.length}项岗位要求</p></article>`;
     }).join('')||'<p class="batch-empty">尚无筛选结果。保存条件后，在BOSS扩展点击“按已保存条件搜索并筛选”。</p>';
     q('#application-batches').innerHTML=deliveries.batches.map(b=>{
       const items=deliveries.items.filter(i=>i.batch_id===b.id);
@@ -93,14 +123,15 @@
     }
     finally{loading=false;}
   }
+  q('#search-preferences-form').addEventListener('input',event=>{event.currentTarget.dataset.edited='true';});
   q('#search-preferences-form').addEventListener('submit',event=>{event.preventDefault();if(working)return;
     const openSearch=event.submitter?.value==='search',popup=openSearch?window.open('about:blank','_blank'):null;if(popup)popup.opener=null;
     void act(async()=>{try{
     const form=event.target,body={};for(const name of ['titles','cities','districts','required_keywords','excluded_companies'])body[name]=list(form.elements[name].value);
     for(const name of ['limit','search_limit','min_score'])body[name]=Number(form.elements[name].value);
     body.min_salary_k=form.elements.min_salary_k.value===''?null:Number(form.elements.min_salary_k.value);body.min_coverage=Number(form.elements.min_coverage.value)/100;
-    for(const name of ['accept_internship','accept_other_cities','auto_favorite'])body[name]=form.elements[name].checked;
-    const result=await api('/api/opportunities/preferences','PUT',body);q('#preferences-status').textContent='已保存条件版本 '+result.revision;await load();
+    for(const name of ['require_all_keywords','accept_internship','accept_other_cities','auto_favorite'])body[name]=form.elements[name].checked;
+    const result=await api('/api/opportunities/preferences','PUT',body);delete form.dataset.edited;q('#preferences-status').textContent='已保存条件版本 '+result.revision;await load();
     const first=result.search_plan?.entries[0];if(openSearch&&first&&popup)popup.location.replace(first.url);else popup?.close();
     toast(openSearch&&!popup?'条件已保存。浏览器未打开新页面，请点击搜索计划中的链接。':'筛选条件已保存。已开启自动求职的扩展将按新条件搜索');
     }catch(err){popup?.close();throw err;}
@@ -116,7 +147,7 @@
   });});
   document.addEventListener('change',event=>{
     if(event.target.dataset.pickOpportunity){const id=event.target.dataset.pickOpportunity;if(event.target.checked)picked.add(id);else picked.delete(id);alignConnection();}
-    if(event.target.id==='application-connection'){const c=connections.find(c=>c.id===event.target.value);q('#application-batch-form').elements.account_label.value=c?.labels?.account||'';}
+    if(event.target.id==='application-connection'){const c=connections.find(c=>c.id===event.target.value);q('#application-batch-form').elements.account_label.value=c?.labels?.account||'';renderGreetingRule();}
   });
   document.addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;
     if(button.id==='application-review-close'){q('#application-review').close();return;}
